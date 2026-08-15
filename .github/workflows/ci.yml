@@ -163,6 +163,24 @@ jobs:
           fi
           sudo usermod --append --groups lxd "$USER"
 
+      # The runner image ships a running Docker daemon, which sets the FORWARD
+      # policy to DROP. Bridged LXD traffic is forwarded, so without this the
+      # test instance still resolves names through the bridge but cannot reach
+      # any archive, and provisioning fails on apt.
+      - name: Allow LXD bridge traffic through the host firewall
+        run: |
+          if ! ip link show lxdbr0 >/dev/null 2>&1; then
+            printf '%s\n' 'lxdbr0 is missing; LXD did not create its bridge.' >&2
+            exit 1
+          fi
+          if sudo iptables --numeric --list DOCKER-USER >/dev/null 2>&1; then
+            sudo iptables --insert DOCKER-USER --in-interface lxdbr0 --jump ACCEPT
+            sudo iptables --insert DOCKER-USER --out-interface lxdbr0 \
+              --match conntrack --ctstate RELATED,ESTABLISHED --jump ACCEPT
+          fi
+          sudo iptables --policy FORWARD ACCEPT
+          sudo iptables --list-rules FORWARD
+
       - name: Bootstrap pinned dependencies
         run: make venv
 

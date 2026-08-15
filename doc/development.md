@@ -98,6 +98,17 @@ Dependency Review already downgrades an unwritable pull request to a warning. A
 missing comment therefore never changes a check result, and the identical
 report always remains in the job summary.
 
+The live job opens the host firewall for the LXD bridge before it runs. The
+hosted runner image ships a running Docker daemon, which sets the `FORWARD`
+policy to `DROP`. Bridged instance traffic is forwarded traffic, so without that
+step the test instance resolves names through `lxdbr0` and then reaches no
+archive at all, and provisioning fails inside apt rather than in anything this
+project owns.
+
+Dependency Review additionally requires the repository dependency graph. While
+it is disabled the job fails with `Dependency review is not supported on this
+repository`, independently of the pull request contents.
+
 All third-party `uses:` references are pinned to full commit hashes and retain
 the release version in a comment. Dependabot checks both Python dependencies
 and GitHub Actions weekly. Dependency Review and CodeQL result upload require a
