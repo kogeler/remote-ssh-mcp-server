@@ -23,6 +23,9 @@ jobs:
     name: Lint, test, and audit
     runs-on: ubuntu-26.04
     timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -44,14 +47,51 @@ jobs:
       - name: Bootstrap pinned dependencies
         run: make venv
 
+      # GITHUB_ACTIONS is already set for the mypy annotation filter; Ruff needs
+      # its own renderer selected explicitly.
       - name: Run local CI matrix
+        env:
+          RUFF_OUTPUT_FORMAT: github
         run: make ci
+
+      - name: Publish the coverage report
+        if: ${{ !cancelled() }}
+        env:
+          REPORT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -o pipefail
+          if [[ ! -f .coverage ]]; then
+            printf '%s\n' 'Coverage data was not produced by this run.' \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            make coverage-report
+            printf '\n<sub>Commit %s · reproduce with: make test && make coverage-report</sub>\n' \
+              "${REPORT_SHA:0:7}"
+          } | tee coverage-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      # Fork pull requests receive a read-only token whatever this job requests,
+      # so a rejected comment must never mask the real quality-gate result.
+      - name: Comment the coverage report on the pull request
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [[ -f coverage-report.md ]]; then
+            .github/scripts/pr-comment.sh coverage coverage-report.md
+          fi
 
   dependency-review:
     name: Dependency review
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-26.04
     timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -63,6 +103,9 @@ jobs:
         with:
           fail-on-severity: moderate
           fail-on-scopes: runtime, development, unknown
+          # The action downgrades an unwritable pull request to a warning, so
+          # this never turns a clean dependency result into a failed check.
+          comment-summary-in-pr: always
 
   codeql:
     name: CodeQL
@@ -119,6 +162,24 @@ jobs:
             sudo /snap/bin/lxd init --minimal
           fi
           sudo usermod --append --groups lxd "$USER"
+
+      # The runner image ships a running Docker daemon, which sets the FORWARD
+      # policy to DROP. Bridged LXD traffic is forwarded, so without this the
+      # test instance still resolves names through the bridge but cannot reach
+      # any archive, and provisioning fails on apt.
+      - name: Allow LXD bridge traffic through the host firewall
+        run: |
+          if ! ip link show lxdbr0 >/dev/null 2>&1; then
+            printf '%s\n' 'lxdbr0 is missing; LXD did not create its bridge.' >&2
+            exit 1
+          fi
+          if sudo iptables --numeric --list DOCKER-USER >/dev/null 2>&1; then
+            sudo iptables --insert DOCKER-USER --in-interface lxdbr0 --jump ACCEPT
+            sudo iptables --insert DOCKER-USER --out-interface lxdbr0 \
+              --match conntrack --ctstate RELATED,ESTABLISHED --jump ACCEPT
+          fi
+          sudo iptables --policy FORWARD ACCEPT
+          sudo iptables --list-rules FORWARD
 
       - name: Bootstrap pinned dependencies
         run: make venv
