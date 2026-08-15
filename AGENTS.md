@@ -20,10 +20,18 @@ repository. Read the relevant documentation below before editing behavior.
   design decisions, repository layout, and future scope.
 - `doc/development.md` defines local checks, dependency updates, and the
   automatic and FIDO-assisted live LXC workflows.
+- `doc/contributing.md` is the human contributor guide: environment setup, the
+  change loop, review expectations, and pull request requirements. Follow it
+  when preparing a change on someone's behalf.
 - `doc/examples/` contains complete Codex and Claude Code client examples.
 - `Makefile` is the supported development and validation interface.
 - `.github/workflows/ci.yml` is the SHA-pinned pull-request and `main` CI,
-  including CodeQL and the automatic live LXC job.
+  including CodeQL, the automatic live LXC job, and the pull-request coverage
+  and dependency reports.
+- `.github/scripts/pr-comment.sh` publishes one sticky pull-request comment per
+  report marker.
+- `.github/scripts/annotate-diagnostics.sh` turns gcc-style tool output into
+  workflow annotations on the diff and is a pass-through outside CI.
 - `.github/dependabot.yml` schedules grouped Python and GitHub Actions updates.
 - `.github/CODEOWNERS` assigns `@kogeler` as the default owner of every path.
 
@@ -99,6 +107,11 @@ After intentionally changing dependencies, update only direct versions in
 `pyproject.toml`, run `make refresh-dependencies`, and review the complete
 generated tree in `requirements.txt`. Never hand-edit the freeze. Keep pytest
 parallel-safe because the default suite runs through pytest-xdist workers.
+
+Every pytest run measures branch coverage and fails below
+`[tool.coverage.report].fail_under` in `pyproject.toml`, which is the only
+place that stores the threshold. Raise it when the suite improves; never lower
+it to make a red build green.
 
 Local tests must not use a real SSH identity. Keep process fakes strict enough
 to prove argument vectors, one-authentication behavior, cleanup, and no-fallback

@@ -4,6 +4,8 @@ venv/
 **/__pycache__/
 *.py[cod]
 .coverage
+coverage.xml
+coverage-report.md
 htmlcov/
 /build/
 /dist/

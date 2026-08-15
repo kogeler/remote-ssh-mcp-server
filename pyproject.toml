@@ -22,6 +22,7 @@ dev = [
     "pip-audit==2.10.1",
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
+    "pytest-cov==7.1.0",
     "pytest-xdist==3.8.0",
     "ruff==0.16.3",
 ]
@@ -41,3 +42,21 @@ strict = true
 exclude_dirs = ["tests", "venv"]
 # Runtime asserts narrow types after validated lifecycle and schema checks.
 skips = ["B101"]
+
+[tool.coverage.run]
+branch = true
+source = ["remote_ssh_mcp"]
+
+[tool.coverage.report]
+# Measured total is about 76.9%, with occasional jitter from timing-sensitive
+# branches. The gate keeps a small margin for that and for refactors while
+# still failing on a real regression.
+fail_under = 75
+precision = 2
+show_missing = true
+skip_covered = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@overload",
+]
