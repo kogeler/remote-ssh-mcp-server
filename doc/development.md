@@ -137,62 +137,61 @@ make live-test
   and security-audit tools;
 - exact versions make dependency review explicit and easy to update.
 
-`requirements.txt` is generated output. It contains the complete resolved tree,
-including transitives, and is the reproducible installer input for the launcher
-and CI. It deliberately excludes the project itself so it never contains a
-machine-specific local path.
+Two lock files are generated from it by `pip-compile`, and neither is ever
+edited by hand:
 
-After updating direct versions in `pyproject.toml`, rebuild everything from an
-empty environment:
+- `requirements.txt` resolves `[project].dependencies` only. The launcher
+  installs this one, so an installed server carries no linter, type checker, or
+  test runner.
+- `requirements-dev.txt` resolves the same tree plus the `dev` extra. `make
+  venv` installs it on top, which is what every check runs against.
+
+Both files pin every transitive package and carry `--hash` lines for each one.
+Hashes put pip into hash-checking mode, so an artifact that does not match the
+recorded digest is refused rather than installed. Both files exclude the project
+itself, so neither contains a machine-specific local path.
+
+After changing a version in `pyproject.toml`, recompile:
+
+```bash
+make lock
+make check
+```
+
+`make lock` respects the pins that already satisfy `pyproject.toml`, so it
+changes only what your edit forced. To move the whole tree to current versions
+instead, rebuild from an empty environment:
 
 ```bash
 make refresh-dependencies
 make check
 ```
 
-The refresh target deletes `venv/`, creates it again, upgrades pip, installs the
-project with its `dev` extra to resolve the complete tree, removes the project
-wheel itself, writes `pip freeze --exclude remote-ssh-mcp` to
-`requirements.txt`, updates the launcher's successful-install marker, and
-removes temporary build metadata. The resulting environment therefore matches
-the frozen installer input exactly and can be audited without a local-project
-exception.
+That target deletes `venv/`, creates it again, bootstraps `pip-tools`,
+recompiles both locks with `--upgrade`, installs the development lock, and
+updates the launcher's install markers.
 
-Use `make freeze` only to capture the already-installed environment. Never
-hand-edit `requirements.txt`; update direct dependencies in `pyproject.toml`
-and regenerate it.
+`make freeze-check` recompiles both locks into temporary copies and compares
+them, ignoring comments. Because it does not pass `--upgrade`, a newly released
+version elsewhere on PyPI cannot make it fail; only a lock that no longer
+matches `pyproject.toml` can. It needs network access.
 
 ### Automated Updates
 
-Dependabot edits one pinned line at a time, which is exactly the hand-edit the
-rule above forbids. In a full freeze every transitive package looks like a
-direct requirement, and raising one on its own can be unsatisfiable: `pydantic`
-requires an exact `pydantic-core`, and `pydantic-core` publishes releases ahead
-of the stable `pydantic` that consumes them. A freeze bumped that way fails in
-pip before any check runs.
+Dependabot recognises `pip-compile` output by the header the tool writes, and
+recompiles the whole tree rather than editing one pinned line. That distinction
+matters: a single edited line in a resolved tree is usually unsatisfiable.
+`pydantic` requires an exact `pydantic-core`, and `pydantic-core` publishes
+releases ahead of the stable `pydantic` that consumes them, so a lone bump of
+that transitive package fails in pip before any check can run.
 
-Two mechanisms keep that from happening, without hiding anything from GitHub:
+Never remove the header, and never add `--no-header` to the compile flags. It is
+the only thing that tells Dependabot how the file was produced.
 
-- `.github/dependabot.yml` allows only the names pinned by hand in
-  `pyproject.toml`, so a transitive package is never proposed on its own.
-  `tests/test_repository_layout.py` fails if that list and the pins drift apart,
-  so a new direct dependency cannot be forgotten.
-- `.github/workflows/dependabot-freeze.yml` rebuilds the freeze with
-  `make refresh-dependencies` on Dependabot pull requests and pushes the
-  coherent tree onto the same branch. Re-running it on an already coherent
-  branch pushes nothing.
-
-`requirements.txt` deliberately keeps its name and its complete transitive
-content. That file is what GitHub parses into the dependency graph, and the
-graph is what gives Dependabot alerts and Dependency Review visibility into
-transitive packages. Renaming it would silence the noise and the security
-signal together.
-
-A commit pushed with the default `GITHUB_TOKEN` does not start a new workflow
-run, so the regenerated head keeps the check runs of the previous commit.
-Re-run the checks manually, or add a Dependabot secret named
-`DEPENDABOT_PUSH_TOKEN` holding a token with `contents: write` for this
-repository, which the workflow prefers when present.
+Both locks keep the complete transitive tree in a file GitHub parses into the
+dependency graph. The graph is what gives Dependabot alerts and Dependency
+Review visibility into transitive packages, so shrinking these files to direct
+dependencies would silence the security signal along with the noise.
 
 ## Documentation And Schemas
 

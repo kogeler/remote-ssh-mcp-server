@@ -26,10 +26,13 @@ remote-ssh-mcp --help
 ```
 
 On first use, the launcher creates `venv/` inside the repository and installs
-the exact complete dependency tree from `requirements.txt`. Direct dependencies
-are maintained separately in `pyproject.toml`; normal users and CI consume only
-the reproducible freeze. The launcher records the successfully installed freeze
-and retries a failed or interrupted installation next time.
+the exact runtime dependency tree from `requirements.txt`. Every package in that
+file is pinned and carries its hashes, so pip verifies each artifact before
+installing it and refuses anything that does not match. Development tooling
+lives in a separate `requirements-dev.txt` and is never installed here. Direct
+dependencies are maintained in `pyproject.toml`; the locks are generated from
+it. The launcher records the successfully installed lock and retries a failed or
+interrupted installation next time.
 
 Create a dedicated local root for uploads, downloads, and optional complete
 output spools:

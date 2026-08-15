@@ -1,27 +1,12 @@
 version: 2
 updates:
+  # Both lock files are pip-compile output. Dependabot recognises the header
+  # pip-compile writes, so it recompiles the whole tree from pyproject.toml
+  # instead of editing one pinned line, and its pull requests stay resolvable.
   - package-ecosystem: pip
     directory: /
     schedule:
       interval: weekly
-    # requirements.txt is a generated full freeze, so every transitive package
-    # looks like a direct requirement to Dependabot. Bumping one of them alone
-    # produces an unresolvable file, because a pin such as
-    # pydantic==2.13.4 requires pydantic-core==2.46.4 exactly. Restrict updates
-    # to the versions that are pinned by hand in pyproject.toml and let
-    # .github/workflows/dependabot-freeze.yml regenerate the rest of the tree.
-    # tests/test_repository_layout.py keeps this list equal to those pins.
-    allow:
-      - dependency-name: mcp
-      - dependency-name: pydantic
-      - dependency-name: bandit
-      - dependency-name: mypy
-      - dependency-name: pip-audit
-      - dependency-name: pytest
-      - dependency-name: pytest-asyncio
-      - dependency-name: pytest-cov
-      - dependency-name: pytest-xdist
-      - dependency-name: ruff
     groups:
       python-dependencies:
         patterns:

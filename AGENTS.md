@@ -8,8 +8,10 @@ repository. Read the relevant documentation below before editing behavior.
 - `README.md` is the concise public-facing repository overview.
 - `LICENSE` contains the MIT terms for the repository.
 - `pyproject.toml` is the source of direct runtime and development dependencies.
-- `requirements.txt` is the generated complete dependency freeze used by the
-  launcher and CI.
+- `requirements.txt` and `requirements-dev.txt` are generated `pip-compile`
+  locks with hashes. The launcher installs the runtime one; `make venv` adds the
+  development one. Never hand-edit either, and never drop the pip-compile
+  header.
 - `doc/getting-started.md` covers installation, Codex and Claude Code setup,
   connection modes, options, and troubleshooting.
 - `doc/tools.md` defines the MCP tools, command and transfer behavior, and
@@ -32,11 +34,7 @@ repository. Read the relevant documentation below before editing behavior.
   report marker.
 - `.github/scripts/annotate-diagnostics.sh` turns gcc-style tool output into
   workflow annotations on the diff and is a pass-through outside CI.
-- `.github/dependabot.yml` schedules grouped Python and GitHub Actions updates
-  and restricts Python updates to the pins held in `pyproject.toml`.
-- `.github/workflows/dependabot-freeze.yml` regenerates `requirements.txt` on
-  Dependabot pull requests, because a single edited line in a full freeze is
-  rarely a resolvable tree.
+- `.github/dependabot.yml` schedules grouped Python and GitHub Actions updates.
 - `.github/CODEOWNERS` assigns `@kogeler` as the default owner of every path.
 
 Keep documentation and examples synchronized with CLI options, MCP schemas,
@@ -108,9 +106,10 @@ make ci
 ```
 
 After intentionally changing dependencies, update only direct versions in
-`pyproject.toml`, run `make refresh-dependencies`, and review the complete
-generated tree in `requirements.txt`. Never hand-edit the freeze. Keep pytest
-parallel-safe because the default suite runs through pytest-xdist workers.
+`pyproject.toml`, run `make lock`, and review both regenerated locks. Use
+`make refresh-dependencies` to move the whole tree to current versions instead.
+Never hand-edit a lock. Keep pytest parallel-safe because the default suite runs
+through pytest-xdist workers.
 
 Every pytest run measures branch coverage and fails below
 `[tool.coverage.report].fail_under` in `pyproject.toml`, which is the only
