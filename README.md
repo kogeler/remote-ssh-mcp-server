@@ -46,6 +46,7 @@ alias or a host/user/port tuple.
 - [Security model](doc/security.md)
 - [Architecture and design decisions](doc/architecture.md)
 - [Development and live LXC testing](doc/development.md)
+- [Contributing](doc/contributing.md)
 - [Complete documentation index](doc/README.md)
 
 Ready-to-adapt client configurations are in [`doc/examples/`](doc/examples/).

@@ -29,12 +29,19 @@ def test_public_repository_is_self_contained() -> None:
         ".github/dependabot.yml",
         ".github/CODEOWNERS",
         ".github/actionlint.yaml",
+        ".github/scripts/pr-comment.sh",
+        ".github/scripts/annotate-diagnostics.sh",
         "tests/run-live-lxc.sh",
         "tests/run-live-fido-lxc.sh",
         "tests/run-live-lxc-core.sh",
     ):
         assert (root / relative).exists(), relative
-    assert (root / "remote-ssh-mcp").stat().st_mode & 0o111
+    for executable in (
+        "remote-ssh-mcp",
+        ".github/scripts/pr-comment.sh",
+        ".github/scripts/annotate-diagnostics.sh",
+    ):
+        assert (root / executable).stat().st_mode & 0o111, executable
 
 
 def test_github_ci_triggers_main_and_pins_every_action() -> None:
@@ -46,7 +53,14 @@ def test_github_ci_triggers_main_and_pins_every_action() -> None:
     assert "pull_request:\n    branches:\n      - main" in workflow
     assert "make ci" in workflow
     assert "make live-test" in workflow
+    assert "make coverage-report" in workflow
     assert "queries: security-extended" in workflow
+    assert "comment-summary-in-pr" in workflow
+    assert ".github/scripts/pr-comment.sh coverage coverage-report.md" in workflow
+    assert "RUFF_OUTPUT_FORMAT: github" in workflow
+    # Only the two reporting jobs may raise write scope above the read-only
+    # workflow default.
+    assert workflow.count("pull-requests: write") == 2
     assert workflow.count("runs-on: ubuntu-26.04") == 4
     assert "runs-on: ubuntu-24.04" not in workflow
     assert "sudo snap install lxd\n" in workflow
@@ -116,6 +130,7 @@ def test_project_metadata_declares_only_direct_dependencies() -> None:
         "pip-audit==2.10.1",
         "pytest==9.1.1",
         "pytest-asyncio==1.4.0",
+        "pytest-cov==7.1.0",
         "pytest-xdist==3.8.0",
         "ruff==0.16.3",
     ]
@@ -124,6 +139,23 @@ def test_project_metadata_declares_only_direct_dependencies() -> None:
         frozen_version = frozen[parsed.name.casefold().replace("_", "-")]
         assert parsed.specifier.contains(frozen_version, prereleases=True)
     assert "remote-ssh-mcp" not in frozen
+
+
+def test_coverage_gate_is_configured_in_one_place() -> None:
+    root = Path(__file__).resolve().parents[1]
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    pytest_options = (root / "pytest.ini").read_text(encoding="utf-8")
+    makefile = (root / "Makefile").read_text(encoding="utf-8")
+
+    coverage = project["tool"]["coverage"]
+    assert coverage["run"]["source"] == ["remote_ssh_mcp"]
+    assert coverage["run"]["branch"] is True
+    assert coverage["report"]["fail_under"] >= 75
+    # The default pytest run measures coverage, so make check and make ci fail
+    # on a regression without a separate target.
+    assert "--cov" in pytest_options
+    # The Makefile must read the threshold instead of repeating it.
+    assert str(coverage["report"]["fail_under"]) not in makefile
 
 
 def test_local_documentation_links_resolve() -> None:

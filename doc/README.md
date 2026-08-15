@@ -11,6 +11,9 @@
 - [Development](development.md): repository layout, virtual environment,
   checks, dependency updates, and automatic or FIDO-assisted live LXC
   validation.
+- [Contributing](contributing.md): environment setup, the local change loop,
+  test and coverage expectations, dependency and documentation rules, and pull
+  request requirements.
 
 Client examples:
 

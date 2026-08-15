@@ -24,6 +24,32 @@ count for constrained environments by passing it explicitly, for example:
 venv/bin/python -m pytest -n 4
 ```
 
+## Coverage
+
+Every pytest run measures branch coverage of `remote_ssh_mcp` through
+`pytest-cov` and fails when the total drops below the gate, so `make check` and
+`make ci` already enforce it. `[tool.coverage.report].fail_under` in
+`pyproject.toml` is the only place that stores the threshold; the Makefile and
+CI read it from there.
+
+The gate is `75`, chosen against a measured total of about `76.9%`. Repeated
+runs are usually identical, but timing-sensitive branches in the transfer and
+master code can move the total by a few hundredths, so the gate keeps a margin
+for that and for refactors while still failing on a real regression. Raise it
+deliberately when the suite improves; never lower it to make a red build green.
+
+`make coverage-report` renders the last run as Markdown, which is what CI writes
+to the job summary and to the pull-request comment:
+
+```bash
+make test
+make coverage-report
+```
+
+The lowest-covered modules are `server.py` and `cli.py`, because the MCP STDIO
+main loop and argument-parser entry point are exercised mostly through the
+subprocess and live LXC tests, which run outside the coverage process.
+
 The test suite includes isolated configuration and path tests, fake OpenSSH and
 rsync processes, real MCP STDIO sessions, signal and cleanup behavior, launcher
 bootstrap, dependency refresh, and retry after failed installation.
@@ -42,6 +68,35 @@ bootstrap, dependency refresh, and retry after failed installation.
 - the live job installs the current stable LXD snap on a clean Ubuntu 26.04
   runner and executes the automatic ephemeral-key `make live-test` after the
   quality job succeeds.
+
+Two of those jobs also report into the pull request itself:
+
+- the quality job writes the Markdown coverage report to the job summary and,
+  on pull requests, publishes it through `.github/scripts/pr-comment.sh` as one
+  sticky comment that later pushes rewrite in place;
+- Dependency Review posts its own summary of added, updated, and removed
+  dependencies with their licenses and known vulnerabilities.
+
+CodeQL needs no comment step: its findings appear as inline annotations on the
+pull-request diff and in the repository code-scanning view. Ruff and mypy use
+the same channel instead of a comment, because a diagnostic is only useful next
+to the line that caused it. CI sets `RUFF_OUTPUT_FORMAT=github` so Ruff renders
+workflow annotations directly, and `make typecheck` pipes mypy through
+`.github/scripts/annotate-diagnostics.sh`, which converts gcc-style diagnostics
+into annotations and stays a transparent pass-through outside GitHub Actions.
+The pipeline keeps `pipefail`, so annotating never hides a failing tool.
+
+Bandit, pip-audit, ShellCheck, the freeze comparison, and the live LXC run stay
+log-only. They fail rarely, and their output is not addressed to a single line.
+
+Both comment paths need `pull-requests: write`, which the two jobs request
+individually so the workflow default stays `contents: read`. Dependabot-created
+pull requests are covered by that grant, but a pull request from a fork always
+receives a read-only token regardless of the requested scope. Neither path may
+turn that into a failed check: the coverage step is `continue-on-error`, and
+Dependency Review already downgrades an unwritable pull request to a warning. A
+missing comment therefore never changes a check result, and the identical
+report always remains in the job summary.
 
 All third-party `uses:` references are pinned to full commit hashes and retain
 the release version in a comment. Dependabot checks both Python dependencies
