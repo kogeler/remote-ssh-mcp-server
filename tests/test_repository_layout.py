@@ -10,6 +10,7 @@ from packaging.requirements import Requirement
 from remote_ssh_mcp import __version__
 
 MARKDOWN_LINK = re.compile(r"\[[^]]*]\(([^)]+)\)")
+LOCK_PIN = re.compile(r"^([A-Za-z0-9._-]+)==([^\s\\]+)")
 ACTION_REFERENCE = re.compile(
     r"^\s*uses:\s*([^@\s]+)@([0-9a-f]{40})\s+#\s+(v[0-9][^\s]*)$",
     re.MULTILINE,
@@ -24,10 +25,10 @@ def test_public_repository_is_self_contained() -> None:
         "remote-ssh-mcp.py",
         "pyproject.toml",
         "requirements.txt",
+        "requirements-dev.txt",
         "remote_ssh_mcp",
         "doc",
         ".github/workflows/ci.yml",
-        ".github/workflows/dependabot-freeze.yml",
         ".github/dependabot.yml",
         ".github/CODEOWNERS",
         ".github/actionlint.yaml",
@@ -90,32 +91,20 @@ def test_every_workflow_pins_every_action() -> None:
         assert len(references) == workflow.count("uses:"), path.name
 
 
-def test_dependabot_updates_only_hand_pinned_dependencies() -> None:
+def test_dependabot_watches_both_ecosystems() -> None:
     root = Path(__file__).resolve().parents[1]
-    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     configuration = yaml.safe_load(
         (root / ".github/dependabot.yml").read_text(encoding="utf-8")
     )
 
-    pinned = {
-        Requirement(requirement).name
-        for requirement in (
-            *project["project"]["dependencies"],
-            *project["project"]["optional-dependencies"]["dev"],
-        )
-    }
-    pip_updates = [
-        update
-        for update in configuration["updates"]
-        if update["package-ecosystem"] == "pip"
-    ]
-
-    assert len(pip_updates) == 1
-    # requirements.txt is a full freeze, so Dependabot treats transitive
-    # packages as direct requirements. Bumping one alone makes the file
-    # unresolvable, so it may only propose the pyproject.toml pins.
-    allowed = {entry["dependency-name"] for entry in pip_updates[0]["allow"]}
-    assert allowed == pinned
+    ecosystems = {update["package-ecosystem"] for update in configuration["updates"]}
+    assert ecosystems == {"pip", "github-actions"}
+    for update in configuration["updates"]:
+        assert update["schedule"]["interval"] == "weekly"
+        # A restricted allow list belongs to hand-written requirement files.
+        # pip-compile output is recompiled as a whole, so nothing needs to be
+        # withheld from Dependabot here.
+        assert "allow" not in update
 
 
 def test_github_code_owner_covers_the_entire_repository() -> None:
@@ -154,34 +143,82 @@ def test_live_wrappers_share_the_hardened_lxc_core() -> None:
     )
 
 
+def read_lock(path: Path) -> dict[str, str]:
+    """Map every pinned name in pip-compile output to its version."""
+    pins: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = LOCK_PIN.match(line)
+        if match:
+            pins[canonical(match.group(1))] = match.group(2)
+    return pins
+
+
+def canonical(name: str) -> str:
+    return name.casefold().replace("_", "-")
+
+
 def test_project_metadata_declares_only_direct_dependencies() -> None:
     root = Path(__file__).resolve().parents[1]
     project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-    frozen = {
-        name.casefold().replace("_", "-"): version
-        for line in (root / "requirements.txt").read_text(encoding="utf-8").splitlines()
-        if (name := line.partition("==")[0]) and (version := line.partition("==")[2])
-    }
+    runtime = read_lock(root / "requirements.txt")
+    development = read_lock(root / "requirements-dev.txt")
 
     assert project["project"]["version"] == __version__
     direct = project["project"]["dependencies"]
-    development = project["project"]["optional-dependencies"]["dev"]
+    development_pins = project["project"]["optional-dependencies"]["dev"]
     assert direct == ["mcp==2.0.0", "pydantic==2.13.4"]
-    assert development == [
+    assert development_pins == [
         "bandit[toml]==1.9.4",
         "mypy==2.3.1",
         "pip-audit==2.10.1",
+        "pip-tools==7.6.1",
         "pytest==9.1.1",
         "pytest-asyncio==1.4.0",
         "pytest-cov==7.1.0",
         "pytest-xdist==3.8.0",
         "ruff==0.16.3",
     ]
-    for requirement in (*direct, *development):
+
+    for requirement in direct:
         parsed = Requirement(requirement)
-        frozen_version = frozen[parsed.name.casefold().replace("_", "-")]
-        assert parsed.specifier.contains(frozen_version, prereleases=True)
-    assert "remote-ssh-mcp" not in frozen
+        assert parsed.specifier.contains(
+            runtime[canonical(parsed.name)], prereleases=True
+        )
+    for requirement in (*direct, *development_pins):
+        parsed = Requirement(requirement)
+        assert parsed.specifier.contains(
+            development[canonical(parsed.name)], prereleases=True
+        )
+
+    assert "remote-ssh-mcp" not in runtime
+    assert "remote-ssh-mcp" not in development
+
+
+def test_locks_are_verified_and_split_by_audience() -> None:
+    root = Path(__file__).resolve().parents[1]
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    runtime_text = (root / "requirements.txt").read_text(encoding="utf-8")
+    runtime = read_lock(root / "requirements.txt")
+    development = read_lock(root / "requirements-dev.txt")
+
+    # The launcher installs the runtime lock, so a development tool must never
+    # reach an installed server.
+    tools = {
+        canonical(Requirement(requirement).name)
+        for requirement in project["project"]["optional-dependencies"]["dev"]
+    }
+    assert not tools & set(runtime)
+
+    # A shared transitive package resolved to two versions would make the
+    # development environment disagree with what users install.
+    assert set(runtime) <= set(development)
+    assert all(development[name] == version for name, version in runtime.items())
+
+    # Every pin carries hashes, which puts pip into hash-checking mode.
+    assert "--hash=sha256:" in runtime_text
+    for name in runtime:
+        assert runtime_text.count(f"\n{name}==") <= 1
+    assert "autogenerated by pip-compile" in runtime_text
 
 
 def test_coverage_gate_is_configured_in_one_place() -> None:

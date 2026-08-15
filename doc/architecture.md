@@ -101,7 +101,8 @@ remote-ssh-mcp.py           Python executable entry point
 remote_ssh_mcp/             implementation package
 tests/                      local and opt-in live tests
 doc/                        user and maintainer documentation
-requirements.txt            complete frozen dependency tree
+requirements.txt            hashed runtime dependency lock
+requirements-dev.txt        hashed runtime and development lock
 pyproject.toml              direct dependencies and project metadata
 Makefile                    development and validation interface
 AGENTS.md                   agent navigation and invariants

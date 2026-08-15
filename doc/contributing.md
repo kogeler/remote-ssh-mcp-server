@@ -39,9 +39,9 @@ make venv
 ```
 
 `make venv` runs the launcher, which creates the virtual environment and
-installs the exact pinned tree from `requirements.txt`. Never install project
-dependencies into a system or user environment, and never activate an unrelated
-virtual environment for this repository.
+installs the hashed runtime lock, then adds the development lock on top. Never
+install project dependencies into a system or user environment, and never
+activate an unrelated virtual environment for this repository.
 
 `make help` lists every supported target. Make is the supported interface;
 prefer it over calling the tools directly so local runs match CI.
@@ -117,17 +117,18 @@ contract.
 ## Dependencies
 
 `pyproject.toml` is the only file you edit by hand, and only its direct pinned
-versions. `requirements.txt` is generated output:
+versions. `requirements.txt` and `requirements-dev.txt` are `pip-compile`
+output:
 
 ```bash
-make refresh-dependencies
+make lock
 make check
 ```
 
-Never hand-edit `requirements.txt`; `make check` compares it against the
-installed environment and fails on any drift. Adding a direct dependency also
-means adding it to the Dependabot allow list in `.github/dependabot.yml`; a
-test fails if the two drift apart. Justify every new direct
+Never hand-edit a lock; `make check` recompiles both and fails on any drift.
+Runtime dependencies belong in `[project].dependencies` and reach every
+installed server, so weigh them accordingly; tooling belongs in the `dev` extra
+and never leaves a development environment. Justify every new direct
 dependency in the pull request. A dependency that a few lines of standard
 library code replace will be questioned.
 

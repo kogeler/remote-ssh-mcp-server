@@ -8,7 +8,13 @@ MYPY := venv/bin/mypy
 BANDIT := venv/bin/bandit
 SYSTEM_PYTHON ?= python3
 VENV_DIR := venv
-PROJECT_PACKAGE := remote-ssh-mcp
+PIP_COMPILE := venv/bin/pip-compile
+RUNTIME_LOCK := requirements.txt
+DEVELOPMENT_LOCK := requirements-dev.txt
+# --generate-hashes turns every install into a verified install. The header
+# pip-compile writes is also what lets Dependabot recompile the whole tree
+# instead of editing one line, so never add --no-header.
+COMPILE := --quiet --strip-extras --allow-unsafe --generate-hashes
 LAUNCHER := ./remote-ssh-mcp
 LIVE_HARNESS := tests/run-live-lxc.sh
 LIVE_FIDO_HARNESS := tests/run-live-fido-lxc.sh
@@ -27,7 +33,7 @@ PUBLIC_KEY ?=
 IDENTITY_FILE ?=
 LXC_IMAGE ?= images:debian/13
 
-.PHONY: help venv freeze refresh-dependencies freeze-check format lint \
+.PHONY: help venv lock refresh-dependencies freeze-check format lint \
 	typecheck bandit audit test coverage-report syntax shellcheck check ci clean \
 	live-preflight live-test \
 	live-fido-preflight live-fido-test
@@ -35,9 +41,9 @@ LXC_IMAGE ?= images:debian/13
 help:
 	@printf '%s\n' \
 		'make venv          Bootstrap or update the tool-local virtual environment' \
-		'make freeze        Replace requirements.txt with the complete pip freeze' \
+		'make lock          Recompile both locks after a pyproject.toml change' \
 		'make refresh-dependencies' \
-		'                   Rebuild venv from pyproject.toml and freeze the full tree' \
+		'                   Rebuild venv and recompile both locks at latest versions' \
 		'make format        Apply Ruff fixes and formatting' \
 		'make lint          Check Ruff lint and formatting' \
 		'make typecheck     Run strict mypy static type analysis' \
@@ -59,17 +65,21 @@ help:
 		'make live-fido-test PUBLIC_KEY=... IDENTITY_FILE=... [LXC_IMAGE=...]' \
 		'                   Run the hardware-key LXC test'
 
+# The launcher installs the runtime lock only. Development tools live in the
+# same environment but come from the development lock, so an installed server
+# never carries a linter, a type checker, or a test runner.
 venv:
 	@$(LAUNCHER) --help >/dev/null
+	@if [[ ! -f "$(VENV_DIR)/.$(DEVELOPMENT_LOCK)" ]] || \
+		! cmp -s $(DEVELOPMENT_LOCK) "$(VENV_DIR)/.$(DEVELOPMENT_LOCK)"; then \
+		$(PYTHON) -m pip install --requirement $(DEVELOPMENT_LOCK); \
+		cp -- $(DEVELOPMENT_LOCK) "$(VENV_DIR)/.$(DEVELOPMENT_LOCK)"; \
+	fi
 
-freeze: venv
-	@temporary=$$(mktemp requirements.txt.XXXXXXXX); \
-		trap '[[ ! -e "$$temporary" ]] || unlink "$$temporary"' EXIT; \
-		$(PYTHON) -m pip freeze --exclude $(PROJECT_PACKAGE) > "$$temporary"; \
-		chmod 0644 "$$temporary"; \
-		mv -- "$$temporary" requirements.txt; \
-		trap - EXIT
-	@cp -- requirements.txt venv/.requirements.txt
+lock: venv
+	@$(PIP_COMPILE) $(COMPILE) --output-file=$(RUNTIME_LOCK) pyproject.toml
+	@$(PIP_COMPILE) $(COMPILE) --extra=dev \
+		--output-file=$(DEVELOPMENT_LOCK) pyproject.toml
 	@for path in build dist *.egg-info; do \
 		if [[ -d "$$path" ]]; then find "$$path" -depth -delete; fi; \
 	done
@@ -82,21 +92,32 @@ refresh-dependencies:
 	@if [[ -e "$(VENV_DIR)" ]]; then find "$(VENV_DIR)" -depth -delete; fi
 	@$(SYSTEM_PYTHON) -m venv "$(VENV_DIR)"
 	@$(PYTHON) -m pip install --upgrade pip
-	@$(PYTHON) -m pip install --upgrade '.[dev]'
-	@$(PYTHON) -m pip uninstall --yes $(PROJECT_PACKAGE)
-	@temporary=$$(mktemp requirements.txt.XXXXXXXX); \
-		trap '[[ ! -e "$$temporary" ]] || unlink "$$temporary"' EXIT; \
-		$(PYTHON) -m pip freeze --exclude $(PROJECT_PACKAGE) > "$$temporary"; \
-		chmod 0644 "$$temporary"; \
-		mv -- "$$temporary" requirements.txt; \
-		trap - EXIT
-	@cp -- requirements.txt venv/.requirements.txt
+	@$(PYTHON) -m pip install --upgrade pip-tools
+	@$(PIP_COMPILE) $(COMPILE) --upgrade \
+		--output-file=$(RUNTIME_LOCK) pyproject.toml
+	@$(PIP_COMPILE) $(COMPILE) --upgrade --extra=dev \
+		--output-file=$(DEVELOPMENT_LOCK) pyproject.toml
+	@$(PYTHON) -m pip install --requirement $(DEVELOPMENT_LOCK)
+	@cp -- $(RUNTIME_LOCK) "$(VENV_DIR)/.$(RUNTIME_LOCK)"
+	@cp -- $(DEVELOPMENT_LOCK) "$(VENV_DIR)/.$(DEVELOPMENT_LOCK)"
 	@for path in build dist *.egg-info; do \
 		if [[ -d "$$path" ]]; then find "$$path" -depth -delete; fi; \
 	done
 
+# Recompiling without --upgrade keeps every satisfiable pin, so this reports
+# only a lock that no longer matches pyproject.toml.
 freeze-check: venv
-	@diff -u requirements.txt <($(PYTHON) -m pip freeze --exclude $(PROJECT_PACKAGE))
+	@runtime=$$(mktemp $(RUNTIME_LOCK).XXXXXXXX); \
+		development=$$(mktemp $(DEVELOPMENT_LOCK).XXXXXXXX); \
+		trap 'rm -f -- "$$runtime" "$$development"' EXIT; \
+		cp -- $(RUNTIME_LOCK) "$$runtime"; \
+		cp -- $(DEVELOPMENT_LOCK) "$$development"; \
+		$(PIP_COMPILE) $(COMPILE) --output-file="$$runtime" pyproject.toml; \
+		$(PIP_COMPILE) $(COMPILE) --extra=dev \
+			--output-file="$$development" pyproject.toml; \
+		diff -u <(grep -v '^#' $(RUNTIME_LOCK)) <(grep -v '^#' "$$runtime"); \
+		diff -u <(grep -v '^#' $(DEVELOPMENT_LOCK)) \
+			<(grep -v '^#' "$$development")
 
 format: venv
 	@$(RUFF) check --fix remote_ssh_mcp tests remote-ssh-mcp.py
