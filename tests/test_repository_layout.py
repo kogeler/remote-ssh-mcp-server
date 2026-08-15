@@ -65,6 +65,8 @@ def test_github_ci_triggers_main_and_pins_every_action() -> None:
     assert "runs-on: ubuntu-24.04" not in workflow
     assert "sudo snap install lxd\n" in workflow
     assert "snap install lxd --channel" not in workflow
+    # The runner ships Docker, which blocks forwarded LXD bridge traffic.
+    assert "DOCKER-USER" in workflow
     assert len(references) == workflow.count("uses:")
     assert {name for name, _commit, _version in references} == {
         "actions/checkout",
