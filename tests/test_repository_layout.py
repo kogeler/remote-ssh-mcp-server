@@ -4,6 +4,7 @@ import re
 import tomllib
 from pathlib import Path
 
+import yaml
 from packaging.requirements import Requirement
 
 from remote_ssh_mcp import __version__
@@ -26,6 +27,7 @@ def test_public_repository_is_self_contained() -> None:
         "remote_ssh_mcp",
         "doc",
         ".github/workflows/ci.yml",
+        ".github/workflows/dependabot-freeze.yml",
         ".github/dependabot.yml",
         ".github/CODEOWNERS",
         ".github/actionlint.yaml",
@@ -75,6 +77,45 @@ def test_github_ci_triggers_main_and_pins_every_action() -> None:
         "github/codeql-action/analyze",
         "github/codeql-action/init",
     }
+
+
+def test_every_workflow_pins_every_action() -> None:
+    root = Path(__file__).resolve().parents[1]
+    workflows = sorted((root / ".github/workflows").glob("*.yml"))
+
+    assert workflows, "no workflow files found"
+    for path in workflows:
+        workflow = path.read_text(encoding="utf-8")
+        references = ACTION_REFERENCE.findall(workflow)
+        assert len(references) == workflow.count("uses:"), path.name
+
+
+def test_dependabot_updates_only_hand_pinned_dependencies() -> None:
+    root = Path(__file__).resolve().parents[1]
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    configuration = yaml.safe_load(
+        (root / ".github/dependabot.yml").read_text(encoding="utf-8")
+    )
+
+    pinned = {
+        Requirement(requirement).name
+        for requirement in (
+            *project["project"]["dependencies"],
+            *project["project"]["optional-dependencies"]["dev"],
+        )
+    }
+    pip_updates = [
+        update
+        for update in configuration["updates"]
+        if update["package-ecosystem"] == "pip"
+    ]
+
+    assert len(pip_updates) == 1
+    # requirements.txt is a full freeze, so Dependabot treats transitive
+    # packages as direct requirements. Bumping one alone makes the file
+    # unresolvable, so it may only propose the pyproject.toml pins.
+    allowed = {entry["dependency-name"] for entry in pip_updates[0]["allow"]}
+    assert allowed == pinned
 
 
 def test_github_code_owner_covers_the_entire_repository() -> None:

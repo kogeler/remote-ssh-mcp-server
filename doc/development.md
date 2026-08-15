@@ -110,9 +110,11 @@ it is disabled the job fails with `Dependency review is not supported on this
 repository`, independently of the pull request contents.
 
 All third-party `uses:` references are pinned to full commit hashes and retain
-the release version in a comment. Dependabot checks both Python dependencies
-and GitHub Actions weekly. Dependency Review and CodeQL result upload require a
-public repository or GitHub Advanced Security when the repository is private.
+the release version in a comment, in every workflow. Dependabot checks both
+Python dependencies and GitHub Actions weekly; see the dependency section below
+for why its Python updates are restricted. Dependency Review and CodeQL result
+upload require a public repository or GitHub Advanced Security when the
+repository is private.
 Ubuntu 26.04 is selected explicitly and might remain a GitHub public-preview
 runner until GitHub promotes the image to general availability. The
 `.github/actionlint.yaml` compatibility entry teaches actionlint `v1.7.12`
@@ -159,6 +161,38 @@ exception.
 Use `make freeze` only to capture the already-installed environment. Never
 hand-edit `requirements.txt`; update direct dependencies in `pyproject.toml`
 and regenerate it.
+
+### Automated Updates
+
+Dependabot edits one pinned line at a time, which is exactly the hand-edit the
+rule above forbids. In a full freeze every transitive package looks like a
+direct requirement, and raising one on its own can be unsatisfiable: `pydantic`
+requires an exact `pydantic-core`, and `pydantic-core` publishes releases ahead
+of the stable `pydantic` that consumes them. A freeze bumped that way fails in
+pip before any check runs.
+
+Two mechanisms keep that from happening, without hiding anything from GitHub:
+
+- `.github/dependabot.yml` allows only the names pinned by hand in
+  `pyproject.toml`, so a transitive package is never proposed on its own.
+  `tests/test_repository_layout.py` fails if that list and the pins drift apart,
+  so a new direct dependency cannot be forgotten.
+- `.github/workflows/dependabot-freeze.yml` rebuilds the freeze with
+  `make refresh-dependencies` on Dependabot pull requests and pushes the
+  coherent tree onto the same branch. Re-running it on an already coherent
+  branch pushes nothing.
+
+`requirements.txt` deliberately keeps its name and its complete transitive
+content. That file is what GitHub parses into the dependency graph, and the
+graph is what gives Dependabot alerts and Dependency Review visibility into
+transitive packages. Renaming it would silence the noise and the security
+signal together.
+
+A commit pushed with the default `GITHUB_TOKEN` does not start a new workflow
+run, so the regenerated head keeps the check runs of the previous commit.
+Re-run the checks manually, or add a Dependabot secret named
+`DEPENDABOT_PUSH_TOKEN` holding a token with `contents: write` for this
+repository, which the workflow prefers when present.
 
 ## Documentation And Schemas
 
