@@ -32,7 +32,11 @@ repository. Read the relevant documentation below before editing behavior.
   report marker.
 - `.github/scripts/annotate-diagnostics.sh` turns gcc-style tool output into
   workflow annotations on the diff and is a pass-through outside CI.
-- `.github/dependabot.yml` schedules grouped Python and GitHub Actions updates.
+- `.github/dependabot.yml` schedules grouped Python and GitHub Actions updates
+  and restricts Python updates to the pins held in `pyproject.toml`.
+- `.github/workflows/dependabot-freeze.yml` regenerates `requirements.txt` on
+  Dependabot pull requests, because a single edited line in a full freeze is
+  rarely a resolvable tree.
 - `.github/CODEOWNERS` assigns `@kogeler` as the default owner of every path.
 
 Keep documentation and examples synchronized with CLI options, MCP schemas,

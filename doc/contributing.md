@@ -125,7 +125,9 @@ make check
 ```
 
 Never hand-edit `requirements.txt`; `make check` compares it against the
-installed environment and fails on any drift. Justify every new direct
+installed environment and fails on any drift. Adding a direct dependency also
+means adding it to the Dependabot allow list in `.github/dependabot.yml`; a
+test fails if the two drift apart. Justify every new direct
 dependency in the pull request. A dependency that a few lines of standard
 library code replace will be questioned.
 
