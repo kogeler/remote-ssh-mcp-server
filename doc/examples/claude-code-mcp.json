@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "remote_machine": {
+      "type": "stdio",
+      "command": "remote-ssh-mcp",
+      "args": [
+        "--local-root",
+        "/absolute/path/to/allowed-local-root"
+      ],
+      "env": {}
+    }
+  }
+}

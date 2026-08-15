@@ -1,0 +1,139 @@
+from __future__ import annotations
+
+import re
+import tomllib
+from pathlib import Path
+
+from packaging.requirements import Requirement
+
+from remote_ssh_mcp import __version__
+
+MARKDOWN_LINK = re.compile(r"\[[^]]*]\(([^)]+)\)")
+ACTION_REFERENCE = re.compile(
+    r"^\s*uses:\s*([^@\s]+)@([0-9a-f]{40})\s+#\s+(v[0-9][^\s]*)$",
+    re.MULTILINE,
+)
+
+
+def test_public_repository_is_self_contained() -> None:
+    root = Path(__file__).resolve().parents[1]
+
+    for relative in (
+        "remote-ssh-mcp",
+        "remote-ssh-mcp.py",
+        "pyproject.toml",
+        "requirements.txt",
+        "remote_ssh_mcp",
+        "doc",
+        ".github/workflows/ci.yml",
+        ".github/dependabot.yml",
+        ".github/CODEOWNERS",
+        ".github/actionlint.yaml",
+        "tests/run-live-lxc.sh",
+        "tests/run-live-fido-lxc.sh",
+        "tests/run-live-lxc-core.sh",
+    ):
+        assert (root / relative).exists(), relative
+    assert (root / "remote-ssh-mcp").stat().st_mode & 0o111
+
+
+def test_github_ci_triggers_main_and_pins_every_action() -> None:
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    references = ACTION_REFERENCE.findall(workflow)
+
+    assert "push:\n    branches:\n      - main" in workflow
+    assert "pull_request:\n    branches:\n      - main" in workflow
+    assert "make ci" in workflow
+    assert "make live-test" in workflow
+    assert "queries: security-extended" in workflow
+    assert workflow.count("runs-on: ubuntu-26.04") == 4
+    assert "runs-on: ubuntu-24.04" not in workflow
+    assert "sudo snap install lxd\n" in workflow
+    assert "snap install lxd --channel" not in workflow
+    assert len(references) == workflow.count("uses:")
+    assert {name for name, _commit, _version in references} == {
+        "actions/checkout",
+        "actions/dependency-review-action",
+        "actions/setup-python",
+        "github/codeql-action/analyze",
+        "github/codeql-action/init",
+    }
+
+
+def test_github_code_owner_covers_the_entire_repository() -> None:
+    root = Path(__file__).resolve().parents[1]
+    codeowners = (root / ".github/CODEOWNERS").read_text(encoding="utf-8")
+
+    rules = [
+        line for line in codeowners.splitlines() if line and not line.startswith("#")
+    ]
+    assert rules == ["* @kogeler"]
+
+
+def test_live_wrappers_share_the_hardened_lxc_core() -> None:
+    root = Path(__file__).resolve().parents[1]
+    automatic = (root / "tests/run-live-lxc.sh").read_text(encoding="utf-8")
+    fido = (root / "tests/run-live-fido-lxc.sh").read_text(encoding="utf-8")
+    core = (root / "tests/run-live-lxc-core.sh").read_text(encoding="utf-8")
+
+    assert "run-live-lxc-core.sh" in automatic
+    assert "run-live-lxc-core.sh" in fido
+    for setting in (
+        "security.nesting=true",
+        "security.syscalls.intercept.mknod=true",
+        "security.syscalls.intercept.setxattr=true",
+        "security.idmap.size=1000000",
+        "security.devlxd=false",
+        "security.idmap.isolated=true",
+        "linux.kernel_modules=br_netfilter",
+        "security.mac_filtering=true",
+        "security.ipv4_filtering=true",
+        "security.ipv6_filtering=true",
+    ):
+        assert core.count(setting) >= 2
+    assert core.index('lxc config device override "$container_name" eth0') < core.index(
+        'lxc start "$container_name"'
+    )
+
+
+def test_project_metadata_declares_only_direct_dependencies() -> None:
+    root = Path(__file__).resolve().parents[1]
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    frozen = {
+        name.casefold().replace("_", "-"): version
+        for line in (root / "requirements.txt").read_text(encoding="utf-8").splitlines()
+        if (name := line.partition("==")[0]) and (version := line.partition("==")[2])
+    }
+
+    assert project["project"]["version"] == __version__
+    direct = project["project"]["dependencies"]
+    development = project["project"]["optional-dependencies"]["dev"]
+    assert direct == ["mcp==2.0.0", "pydantic==2.13.4"]
+    assert development == [
+        "bandit[toml]==1.9.4",
+        "mypy==2.3.1",
+        "pip-audit==2.10.1",
+        "pytest==9.1.1",
+        "pytest-asyncio==1.4.0",
+        "pytest-xdist==3.8.0",
+        "ruff==0.16.3",
+    ]
+    for requirement in (*direct, *development):
+        parsed = Requirement(requirement)
+        frozen_version = frozen[parsed.name.casefold().replace("_", "-")]
+        assert parsed.specifier.contains(frozen_version, prereleases=True)
+    assert "remote-ssh-mcp" not in frozen
+
+
+def test_local_documentation_links_resolve() -> None:
+    root = Path(__file__).resolve().parents[1]
+
+    for document in (root / "README.md", *(root / "doc").glob("*.md")):
+        for target in MARKDOWN_LINK.findall(document.read_text(encoding="utf-8")):
+            if "://" in target or target.startswith("#"):
+                continue
+            path_text = target.split("#", maxsplit=1)[0]
+            assert (document.parent / path_text).exists(), (
+                f"broken link in {document.relative_to(root)}: {target}"
+            )

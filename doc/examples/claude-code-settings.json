@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__remote_machine__connection_status",
+      "mcp__remote_machine__stat",
+      "mcp__remote_machine__list_directory",
+      "mcp__remote_machine__read_file_range",
+      "mcp__remote_machine__transfer_status",
+      "mcp__remote_machine__transfer_list"
+    ],
+    "ask": [
+      "mcp__remote_machine__connect",
+      "mcp__remote_machine__disconnect",
+      "mcp__remote_machine__exec",
+      "mcp__remote_machine__sudo_exec",
+      "mcp__remote_machine__download_start",
+      "mcp__remote_machine__upload_start",
+      "mcp__remote_machine__transfer_cancel"
+    ]
+  }
+}

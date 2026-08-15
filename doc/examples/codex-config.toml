@@ -1,0 +1,48 @@
+# Copy this table into a trusted project's .codex/config.toml and replace the
+# absolute local-root placeholder. SSH targets are selected only with connect.
+[mcp_servers.remote_machine]
+command = "remote-ssh-mcp"
+args = [
+    "--local-root", "/absolute/path/to/allowed-local-root",
+]
+enabled = false
+required = false
+startup_timeout_sec = 180
+tool_timeout_sec = 150
+enabled_tools = [
+    "connect",
+    "disconnect",
+    "connection_status",
+    "exec",
+    "sudo_exec",
+    "stat",
+    "list_directory",
+    "read_file_range",
+    "download_start",
+    "upload_start",
+    "transfer_status",
+    "transfer_cancel",
+    "transfer_list",
+]
+default_tools_approval_mode = "writes"
+
+[mcp_servers.remote_machine.tools.connect]
+approval_mode = "prompt"
+
+[mcp_servers.remote_machine.tools.disconnect]
+approval_mode = "prompt"
+
+[mcp_servers.remote_machine.tools.exec]
+approval_mode = "prompt"
+
+[mcp_servers.remote_machine.tools.sudo_exec]
+approval_mode = "prompt"
+
+[mcp_servers.remote_machine.tools.download_start]
+approval_mode = "prompt"
+
+[mcp_servers.remote_machine.tools.upload_start]
+approval_mode = "prompt"
+
+[mcp_servers.remote_machine.tools.transfer_cancel]
+approval_mode = "prompt"

@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools==84.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "remote-ssh-mcp"
+version = "0.1.0"
+description = "Bounded remote-machine tools for MCP clients over one OpenSSH master"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+    "mcp==2.0.0",
+    "pydantic==2.13.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "bandit[toml]==1.9.4",
+    "mypy==2.3.1",
+    "pip-audit==2.10.1",
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "pytest-xdist==3.8.0",
+    "ruff==0.16.3",
+]
+
+[project.scripts]
+remote-ssh-mcp = "remote_ssh_mcp.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["remote_ssh_mcp*"]
+
+[tool.mypy]
+files = ["remote_ssh_mcp", "remote-ssh-mcp.py"]
+python_version = "3.11"
+strict = true
+
+[tool.bandit]
+exclude_dirs = ["tests", "venv"]
+# Runtime asserts narrow types after validated lifecycle and schema checks.
+skips = ["B101"]
