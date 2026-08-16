@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shlex
 import shutil
@@ -10,9 +11,10 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 TOOL_ROOT = Path(__file__).resolve().parents[2]
 LIVE_RUNNER = TOOL_ROOT / "tests/live_podman_e2e.py"
@@ -21,6 +23,10 @@ SERVER_HOME = Path("/home/box")
 SERVER_LOCAL_ROOT = Path("/work/local-root")
 OWNER_LABEL = "remote-ssh-mcp.owner"
 RUN_LABEL = "remote-ssh-mcp.run"
+CLEANUP_ATTEMPTS = 5
+CLEANUP_RETRY_DELAY = 0.25
+
+ResourceState = Literal["absent", "owned", "foreign", "error"]
 
 
 def run_process(command: list[str], **options: Any) -> subprocess.CompletedProcess[Any]:
@@ -97,62 +103,97 @@ class LiveResources:
     server_name: str | None = None
     network_name: str | None = None
 
-    def _inspect_label(self, kind: str, name: str, path: str) -> tuple[bool, str]:
+    def _resource_state(
+        self, kind: str, name: str, owner: str
+    ) -> tuple[ResourceState, str]:
+        exists = run_process(
+            [self.podman, kind, "exists", name],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if exists.returncode == 1:
+            return "absent", ""
+        if exists.returncode != 0:
+            return "error", f"exists returned status {exists.returncode}"
+
+        labels_path = ".Config.Labels" if kind == "container" else ".Labels"
         completed = run_process(
-            [self.podman, kind, "inspect", "--format", path, name],
+            [
+                self.podman,
+                kind,
+                "inspect",
+                "--format",
+                f"{{{{json {labels_path}}}}}",
+                name,
+            ],
             text=True,
             capture_output=True,
             check=False,
         )
         if completed.returncode != 0:
-            return False, ""
-        return True, completed.stdout.strip()
+            return "error", f"inspect returned status {completed.returncode}"
+        try:
+            labels = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            return "error", "inspect returned malformed labels"
+        if not isinstance(labels, dict):
+            return "error", "inspect returned non-object labels"
+        if labels.get(RUN_LABEL) != name or labels.get(OWNER_LABEL) != owner:
+            return "foreign", "labels do not match this run"
+        return "owned", ""
+
+    @staticmethod
+    def _failure_detail(completed: subprocess.CompletedProcess[str]) -> str:
+        lines = completed.stderr.strip().splitlines()
+        suffix = f": {lines[-1][:300]}" if lines else ""
+        return f"status {completed.returncode}{suffix}"
+
+    def _remove_owned(
+        self, kind: str, name: str, owner: str, remove: list[str]
+    ) -> bool:
+        detail = ""
+        for attempt in range(CLEANUP_ATTEMPTS):
+            state, detail = self._resource_state(kind, name, owner)
+            if state == "absent":
+                return True
+            if state == "foreign":
+                print(
+                    f"live: refusing to remove {name}: {detail}",
+                    file=sys.stderr,
+                )
+                return False
+            if state == "owned":
+                completed = run_process(
+                    [self.podman, *remove, name],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                detail = self._failure_detail(completed)
+            if attempt + 1 < CLEANUP_ATTEMPTS:
+                time.sleep(CLEANUP_RETRY_DELAY)
+
+        state, final_detail = self._resource_state(kind, name, owner)
+        if state == "absent":
+            return True
+        if state == "foreign" or final_detail:
+            detail = final_detail
+        print(
+            f"live: could not remove owned {kind} {name}: {detail}",
+            file=sys.stderr,
+        )
+        return False
 
     def _remove_container(self, name: str, owner: str) -> bool:
-        exists, run_label = self._inspect_label(
-            "container", name, f'{{{{index .Config.Labels "{RUN_LABEL}"}}}}'
+        return self._remove_owned(
+            "container", name, owner, ["rm", "--force", "--time", "5"]
         )
-        if not exists:
-            return True
-        _, owner_label = self._inspect_label(
-            "container", name, f'{{{{index .Config.Labels "{OWNER_LABEL}"}}}}'
-        )
-        if run_label != name or owner_label != owner:
-            print(
-                f"live: refusing to remove {name}: labels do not match this run",
-                file=sys.stderr,
-            )
-            return False
-        completed = run_process(
-            [self.podman, "rm", "--force", "--time", "5", name],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        return completed.returncode == 0
 
     def _remove_network(self, name: str) -> bool:
-        exists, run_label = self._inspect_label(
-            "network", name, f'{{{{index .Labels "{RUN_LABEL}"}}}}'
+        return self._remove_owned(
+            "network", name, "live-network", ["network", "rm", "--force"]
         )
-        if not exists:
-            return True
-        _, owner_label = self._inspect_label(
-            "network", name, f'{{{{index .Labels "{OWNER_LABEL}"}}}}'
-        )
-        if run_label != name or owner_label != "live-network":
-            print(
-                f"live: refusing to remove {name}: labels do not match this run",
-                file=sys.stderr,
-            )
-            return False
-        completed = run_process(
-            [self.podman, "network", "rm", "--force", name],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        return completed.returncode == 0
 
     def cleanup(self) -> bool:
         clean = True

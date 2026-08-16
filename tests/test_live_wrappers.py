@@ -158,7 +158,7 @@ case "$*" in
     trap 'exit 143' TERM
     while true; do sleep 1; done
     ;;
-  "network inspect "*) exit 1 ;;
+  "network exists "*) exit 1 ;;
   *) printf 'unexpected fake Podman call: %s\\n' "$*" >&2; exit 99 ;;
 esac
 """,
