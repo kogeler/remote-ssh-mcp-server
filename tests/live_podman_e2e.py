@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared live LXC black-box test for remote-ssh-mcp.
+"""Shared live black-box test for remote-ssh-mcp against a Podman target.
 
 This file is intentionally not named ``test_*.py``. Run it only against a
 disposable container prepared for this test and with the required environment
@@ -14,6 +14,7 @@ import hashlib
 import os
 import shlex
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -34,27 +35,165 @@ def required_environment(name: str) -> str:
 CONTAINER = required_environment("REMOTE_SSH_MCP_E2E_CONTAINER")
 TARGET = required_environment("REMOTE_SSH_MCP_E2E_TARGET")
 LOCAL_ROOT = Path(required_environment("REMOTE_SSH_MCP_E2E_LOCAL_ROOT"))
-SSH_CONFIG = required_environment("REMOTE_SSH_MCP_TEST_SSH_CONFIG")
-WRAPPER_DIR = required_environment("REMOTE_SSH_MCP_E2E_WRAPPER_DIR")
 LAUNCHER = Path(__file__).resolve().parents[1] / "remote-ssh-mcp"
+PODMAN = os.environ.get("PODMAN", "podman")
+
+# The server under test runs either on this host, next to a hardware key, or in
+# a second container on a private network with the target. SERVER_CONTAINER
+# selects which, and every access to the server's own local root goes through
+# the helpers below so the matrix itself does not care.
+SERVER_CONTAINER = os.environ.get("REMOTE_SSH_MCP_E2E_SERVER_CONTAINER", "")
+SSH_CONFIG = os.environ.get("REMOTE_SSH_MCP_TEST_SSH_CONFIG", "")
+WRAPPER_DIR = os.environ.get("REMOTE_SSH_MCP_E2E_WRAPPER_DIR", "")
 
 
 def evidence(message: str) -> None:
     print(f"E2E_PASS {message}", flush=True)
 
 
-def run_lxc(*arguments: str, input_data: bytes | None = None) -> bytes:
+def run_target(*arguments: str, input_data: bytes | None = None) -> bytes:
+    """Run an administrative command inside the disposable target container."""
     completed = subprocess.run(
-        ["lxc", "exec", CONTAINER, "--", *arguments],
+        [PODMAN, "exec", CONTAINER, *arguments],
         input=input_data,
         capture_output=True,
         check=False,
     )
     if completed.returncode != 0:
         raise AssertionError(
-            f"LXC command {arguments[0]!r} failed with status {completed.returncode}"
+            f"target command {arguments[0]!r} failed with status {completed.returncode}"
         )
     return completed.stdout
+
+
+def target_log() -> str:
+    """Return the container log, which is the only sshd authentication record."""
+    completed = subprocess.run(
+        [PODMAN, "logs", CONTAINER],
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(
+            f"reading the target log failed with status {completed.returncode}"
+        )
+    return (completed.stdout + completed.stderr).decode("utf-8", errors="replace")
+
+
+def target_interface() -> str:
+    """Return the container's outbound interface.
+
+    Rootless Podman names it after the host template interface rather than
+    always using eth0, so it has to be discovered.
+    """
+    if SERVER_CONTAINER:
+        inspected = subprocess.run(
+            [
+                PODMAN,
+                "inspect",
+                "--format",
+                "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+                SERVER_CONTAINER,
+            ],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        assert inspected.returncode == 0
+        server_address = inspected.stdout.strip()
+        assert server_address
+        route = run_target("ip", "route", "get", server_address).decode()
+    else:
+        route = run_target("ip", "route", "show", "default").decode()
+    fields = route.split()
+    if "dev" not in fields:
+        raise AssertionError("the target has no default route")
+    return fields[fields.index("dev") + 1]
+
+
+def local_run(*arguments: str, input_data: bytes | None = None) -> bytes:
+    """Run a command on whichever side owns the server's local root."""
+    command = list(arguments)
+    if SERVER_CONTAINER:
+        command = [PODMAN, "exec", "--interactive", SERVER_CONTAINER, *arguments]
+    completed = subprocess.run(
+        command,
+        input=input_data,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(
+            f"local command {arguments[0]!r} failed with status "
+            f"{completed.returncode}: {completed.stderr.decode(errors='replace')}"
+        )
+    return completed.stdout
+
+
+def local_sha256(path: Path) -> str:
+    if SERVER_CONTAINER:
+        return local_run("sha256sum", str(path)).decode().split()[0]
+    return hash_file(path)
+
+
+def local_read(path: Path) -> bytes:
+    if SERVER_CONTAINER:
+        return local_run("cat", str(path))
+    return path.read_bytes()
+
+
+def local_write(path: Path, content: bytes) -> None:
+    if SERVER_CONTAINER:
+        local_run(
+            "sh",
+            "-c",
+            'umask 077; cat > "$1"',
+            "remote-ssh-mcp-write",
+            str(path),
+            input_data=content,
+        )
+        return
+    path.write_bytes(content)
+
+
+def local_symlink(path: Path, destination: str) -> None:
+    if SERVER_CONTAINER:
+        local_run("ln", "-s", destination, str(path))
+        return
+    path.symlink_to(destination)
+
+
+def local_largest_partial(directory: Path) -> int:
+    """Return the size of the largest resumable partial, or 0 if there is none."""
+    if SERVER_CONTAINER:
+        listing = local_run(
+            "sh",
+            "-c",
+            f"find {directory} -name '*.download' -printf '%s\\n' 2>/dev/null | "
+            "sort -n | tail -n 1",
+        )
+        text = listing.decode().strip()
+        return int(text) if text else 0
+    sizes = [path.stat().st_size for path in directory.glob("*.download")]
+    return max(sizes, default=0)
+
+
+def provide_upload_source(path: Path, marker: bytes, size: int) -> str:
+    """Create the upload payload on the side that runs the server."""
+    if not SERVER_CONTAINER:
+        return write_large_local_file(path, marker, size)
+    with tempfile.TemporaryDirectory() as staging:
+        staged = Path(staging) / path.name
+        digest = write_large_local_file(staged, marker, size)
+        local_run(
+            "sh",
+            "-c",
+            'umask 077; cat > "$1"',
+            "remote-ssh-mcp-upload",
+            str(path),
+            input_data=staged.read_bytes(),
+        )
+    return digest
 
 
 def install_sudo_policy(mode: str) -> None:
@@ -75,7 +214,7 @@ def install_sudo_policy(mode: str) -> None:
         "chmod 0440 /etc/sudoers.d/99-remote-ssh-mcp-e2e; "
         "visudo -cf /etc/sudoers.d/99-remote-ssh-mcp-e2e >/dev/null"
     )
-    run_lxc("/bin/bash", "-c", script)
+    run_target("/bin/bash", "-c", script)
 
 
 def seed_global_sudo_timestamp() -> None:
@@ -84,17 +223,18 @@ def seed_global_sudo_timestamp() -> None:
         "printf '%s\\n' \"$password\" | "
         "runuser -u mcp-test -- sudo -S -v >/dev/null 2>&1; unset password"
     )
-    run_lxc("/bin/bash", "-c", script)
+    run_target("/bin/bash", "-c", script)
 
 
 def set_download_rate_limit(enabled: bool) -> None:
+    interface = target_interface()
     if enabled:
-        run_lxc(
+        run_target(
             "tc",
             "qdisc",
             "replace",
             "dev",
-            "eth0",
+            interface,
             "root",
             "tbf",
             "rate",
@@ -106,24 +246,13 @@ def set_download_rate_limit(enabled: bool) -> None:
         )
         return
     completed = subprocess.run(
-        [
-            "lxc",
-            "exec",
-            CONTAINER,
-            "--",
-            "tc",
-            "qdisc",
-            "del",
-            "dev",
-            "eth0",
-            "root",
-        ],
+        [PODMAN, "exec", CONTAINER, "tc", "qdisc", "del", "dev", interface, "root"],
         capture_output=True,
         check=False,
     )
     if completed.returncode not in {0, 2}:
         raise AssertionError(
-            f"removing the LXC rate limit failed with status {completed.returncode}"
+            f"removing the target rate limit failed with status {completed.returncode}"
         )
 
 
@@ -425,11 +554,11 @@ async def exercise_transfers(session: ClientSession, marker: bytes) -> None:
     download = await wait_transfer(session, download_id)
     assert download["state"] == "completed"
     local_download = LOCAL_ROOT / "downloads/large-download.bin"
-    assert download["sha256"] == hash_file(local_download)
+    assert download["sha256"] == local_sha256(local_download)
     assert marker.decode() not in repr(download)
 
     upload_source = LOCAL_ROOT / "upload-large.bin"
-    upload_hash = write_large_local_file(upload_source, marker, 16 * 1024 * 1024)
+    upload_hash = provide_upload_source(upload_source, marker, 16 * 1024 * 1024)
     upload_id, _ = await start_transfer(
         session,
         "upload_start",
@@ -460,7 +589,7 @@ async def exercise_transfers(session: ClientSession, marker: bytes) -> None:
     assert refused["state"] == "failed"
     assert refused["error"]["code"] == "remote_path_exists"
 
-    upload_source.write_bytes(b"explicit-overwrite")
+    local_write(upload_source, b"explicit-overwrite")
     overwrite_hash = hashlib.sha256(b"explicit-overwrite").hexdigest()
     overwrite_id, _ = await start_transfer(
         session,
@@ -495,7 +624,7 @@ async def exercise_transfers(session: ClientSession, marker: bytes) -> None:
     )
     replaced = await wait_transfer(session, replace_id)
     assert replaced["state"] == "completed"
-    assert local_download.read_bytes() == b"normal-data"
+    assert local_read(local_download) == b"normal-data"
 
     missing_id, _ = await start_transfer(
         session,
@@ -519,7 +648,7 @@ async def exercise_transfers(session: ClientSession, marker: bytes) -> None:
     )
     unusual = await wait_transfer(session, unusual_id)
     assert unusual["state"] == "completed"
-    assert (LOCAL_ROOT / "downloads/unusual.txt").read_bytes() == b"unusual-data"
+    assert local_read(LOCAL_ROOT / "downloads/unusual.txt") == b"unusual-data"
 
     await call_error(
         session,
@@ -530,7 +659,7 @@ async def exercise_transfers(session: ClientSession, marker: bytes) -> None:
         },
         "invalid_local_path",
     )
-    (LOCAL_ROOT / "escape-link").symlink_to("/tmp")
+    local_symlink(LOCAL_ROOT / "escape-link", "/tmp")
     await call_error(
         session,
         "download_start",
@@ -561,9 +690,7 @@ async def exercise_transfers(session: ClientSession, marker: bytes) -> None:
     finally:
         set_download_rate_limit(False)
 
-    partial_files = list((LOCAL_ROOT / ".remote-ssh-mcp/partials").glob("*.download"))
-    assert partial_files
-    partial_size = max(path.stat().st_size for path in partial_files)
+    partial_size = local_largest_partial(LOCAL_ROOT / ".remote-ssh-mcp/partials")
     assert partial_size > 0
     resume_id, _ = await start_transfer(
         session,
@@ -576,7 +703,7 @@ async def exercise_transfers(session: ClientSession, marker: bytes) -> None:
     resumed = await wait_transfer(session, resume_id)
     assert resumed["state"] == "completed"
     assert resumed["total_bytes"] == 128 * 1024 * 1024
-    assert resumed["sha256"] == hash_file(LOCAL_ROOT / "downloads/resumed.bin")
+    assert resumed["sha256"] == local_sha256(LOCAL_ROOT / "downloads/resumed.bin")
 
     set_download_rate_limit(True)
     active_ids: list[str] = []
@@ -639,7 +766,7 @@ async def exercise_transfers(session: ClientSession, marker: bytes) -> None:
 async def prove_explicit_disconnect(
     session: ClientSession, master_pid: int, accepted_before: int
 ) -> None:
-    established = run_lxc(
+    established = run_target(
         "/bin/bash",
         "-c",
         "ss -Htn state established '( sport = :22 )' | wc -l",
@@ -667,21 +794,26 @@ async def prove_explicit_disconnect(
     )
     status = await call_ok(session, "connection_status", {})
     assert status["state"] == "disconnected"
-    try:
-        os.kill(master_pid, 0)
-    except ProcessLookupError:
-        pass
+    if SERVER_CONTAINER:
+        survived = await asyncio.to_thread(
+            subprocess.run,
+            [PODMAN, "exec", SERVER_CONTAINER, "/bin/kill", "-0", str(master_pid)],
+            capture_output=True,
+            check=False,
+        )
+        assert survived.returncode != 0, "SSH master process survived disconnect"
     else:
-        raise AssertionError("SSH master process survived disconnect")
+        try:
+            os.kill(master_pid, 0)
+        except ProcessLookupError:
+            pass
+        else:
+            raise AssertionError("SSH master process survived disconnect")
     await asyncio.sleep(1)
-    logs = run_lxc(
-        "/bin/bash",
-        "-c",
-        "journalctl -u ssh --no-pager -o cat",
-    ).decode("utf-8", errors="replace")
+    logs = target_log()
     accepted_after = logs.count("Accepted publickey for mcp-test")
     assert accepted_after == accepted_before == 1
-    established_after = run_lxc(
+    established_after = run_target(
         "/bin/bash",
         "-c",
         "ss -Htn state established '( sport = :22 )' | wc -l",
@@ -690,34 +822,59 @@ async def prove_explicit_disconnect(
     evidence("explicit disconnect stopped active work, master, and transport")
 
 
-async def main() -> None:
-    assert LOCAL_ROOT.is_absolute() and LOCAL_ROOT.is_dir()
-    assert Path(SSH_CONFIG).is_file()
-    assert Path(WRAPPER_DIR, "ssh").is_file()
-    marker = b"REMOTE_SSH_MCP_TRANSFER_PAYLOAD_SENTINEL_8d73374c"
-    stderr_path = LOCAL_ROOT / "server.stderr"
-    environment = os.environ.copy()
-    environment["PATH"] = f"{WRAPPER_DIR}:{environment['PATH']}"
-    environment["REMOTE_SSH_MCP_TEST_SSH_CONFIG"] = SSH_CONFIG
-    parameters = StdioServerParameters(
+def server_parameters(environment: dict[str, str]) -> StdioServerParameters:
+    """Describe how to start the server under test on the selected side."""
+    options = [
+        "--local-root",
+        str(LOCAL_ROOT),
+        "--connect-timeout",
+        "300",
+        "--command-timeout",
+        "10",
+        "--max-output-bytes",
+        "4096",
+        "--max-transfers",
+        "2",
+        "--log-level",
+        "INFO",
+    ]
+    if SERVER_CONTAINER:
+        return StdioServerParameters(
+            command=PODMAN,
+            args=[
+                "exec",
+                "--interactive",
+                "--workdir",
+                str(LOCAL_ROOT),
+                SERVER_CONTAINER,
+                "/usr/local/bin/python",
+                "/work/src/remote-ssh-mcp.py",
+                *options,
+            ],
+            env=environment,
+        )
+    return StdioServerParameters(
         command=str(LAUNCHER),
-        args=[
-            "--local-root",
-            str(LOCAL_ROOT),
-            "--connect-timeout",
-            "300",
-            "--command-timeout",
-            "10",
-            "--max-output-bytes",
-            "4096",
-            "--max-transfers",
-            "2",
-            "--log-level",
-            "INFO",
-        ],
+        args=options,
         env=environment,
         cwd=LOCAL_ROOT,
     )
+
+
+async def main() -> None:
+    assert LOCAL_ROOT.is_absolute()
+    marker = b"REMOTE_SSH_MCP_TRANSFER_PAYLOAD_SENTINEL_8d73374c"
+    environment = os.environ.copy()
+    if SERVER_CONTAINER:
+        stderr_path = Path(required_environment("REMOTE_SSH_MCP_E2E_STDERR"))
+    else:
+        assert LOCAL_ROOT.is_dir()
+        assert Path(SSH_CONFIG).is_file()
+        assert Path(WRAPPER_DIR, "ssh").is_file()
+        stderr_path = LOCAL_ROOT / "server.stderr"
+        environment["PATH"] = f"{WRAPPER_DIR}:{environment['PATH']}"
+        environment["REMOTE_SSH_MCP_TEST_SSH_CONFIG"] = SSH_CONFIG
+    parameters = server_parameters(environment)
 
     with stderr_path.open("w+", encoding="utf-8") as errlog:
         async with (
@@ -790,13 +947,9 @@ async def main() -> None:
             status_after = await call_ok(session, "connection_status", {})
             assert status_after["state"] == "ready"
             assert status_after["master_pid"] == master_pid
-            logs = run_lxc(
-                "/bin/bash",
-                "-c",
-                "journalctl -u ssh --no-pager -o cat",
-            ).decode("utf-8", errors="replace")
+            logs = target_log()
             accepted = logs.count("Accepted publickey for mcp-test")
-            established = run_lxc(
+            established = run_target(
                 "/bin/bash",
                 "-c",
                 "ss -Htn state established '( sport = :22 )' | wc -l",

@@ -4,14 +4,17 @@
 
 Local machine:
 
-- Python 3 with `venv` support
+- Python 3.11 or newer with `venv` support
+- GNU Make
 - OpenSSH client
 - rsync
 
 Remote machine:
 
-- POSIX shell
-- rsync and sha256sum
+- Linux with `/bin/sh`
+- rsync
+- GNU coreutils and findutils
+- `setsid` from util-linux and `/bin/kill`
 - sudo only when `sudo_exec` is required
 
 ## Installation
@@ -22,17 +25,27 @@ launcher beside `requirements.txt`, `remote-ssh-mcp.py`, and the
 
 ```bash
 export PATH="/path/to/remote-ssh-mcp:$PATH"
+cd /path/to/remote-ssh-mcp
+make runtime-venv
 remote-ssh-mcp --help
 ```
 
-On first use, the launcher creates `venv/` inside the repository and installs
-the exact runtime dependency tree from `requirements.txt`. Every package in that
-file is pinned and carries its hashes, so pip verifies each artifact before
-installing it and refuses anything that does not match. Development tooling
-lives in a separate `requirements-dev.txt` and is never installed here. Direct
-dependencies are maintained in `pyproject.toml`; the locks are generated from
-it. The launcher records the successfully installed lock and retries a failed or
-interrupted installation next time.
+`make runtime-venv` is mandatory before an MCP client starts the launcher. It is
+an explicit trust decision by the local user: the target installs third-party
+runtime code on the host into `venv-runtime/`. Installation accepts wheels
+only, requires every artifact to match a hash in `requirements.txt`, and records
+the successfully installed lock beside the environment. It removes the pip copy
+used to populate the venv, leaving only the locked runtime dependency tree.
+
+The launcher performs no installation. It checks that `venv-runtime/` exists
+and that its recorded lock exactly matches the repository lock, then executes
+the server with `venv-runtime/bin/python`. A missing or stale environment fails
+with an instruction to run `make runtime-venv`; an MCP client can therefore
+never trigger pip or network access merely by starting the server.
+
+Development tooling lives in `requirements-dev.txt` and is not installed into
+the runtime environment. Direct dependencies are maintained in
+`pyproject.toml`; the locks are generated from it.
 
 Create a dedicated local root for uploads, downloads, and optional complete
 output spools:

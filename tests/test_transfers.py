@@ -15,7 +15,7 @@ from remote_ssh_mcp.config import ConnectionSpec, RuntimeConfig
 from remote_ssh_mcp.errors import RemoteMCPError
 from remote_ssh_mcp.inspection import RemoteInspector
 from remote_ssh_mcp.local_paths import LocalPathPolicy
-from remote_ssh_mcp.transfers import TransferManager
+from remote_ssh_mcp.transfers import TransferManager, TransferOperation
 
 FAKE_RSYNC = r"""#!__PYTHON__
 import json
@@ -264,6 +264,33 @@ async def test_existing_remote_upload_is_not_overwritten(
     assert result["error"]["error"] == "remote_path_exists"  # type: ignore[index]
     assert destination.read_bytes() == b"original"
     assert not list(tmp_path.glob("remote-existing.remote-ssh-mcp-*.partial"))
+
+
+@pytest.mark.asyncio
+async def test_upload_conflict_during_copy_removes_partial_before_failure(
+    transfer_stack, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, _master, _paths, _fake = transfer_stack
+    source = tmp_path / "racing-upload"
+    destination = tmp_path / "racing-destination"
+    source.write_bytes(b"replacement")
+    run_rsync = manager._run_rsync
+
+    async def create_destination_then_copy(
+        operation: TransferOperation, rsync_source: str, rsync_destination: str
+    ) -> None:
+        destination.write_bytes(b"concurrent data")
+        await run_rsync(operation, rsync_source, rsync_destination)
+
+    monkeypatch.setattr(manager, "_run_rsync", create_destination_then_copy)
+
+    started = await manager.start_upload("racing-upload", str(destination))
+    result = await wait_for_final(manager, str(started["operation_id"]))
+
+    assert result["state"] == "failed"
+    assert result["error"]["error"] == "remote_path_exists"  # type: ignore[index]
+    assert destination.read_bytes() == b"concurrent data"
+    assert not list(tmp_path.glob("racing-destination.remote-ssh-mcp-*.partial"))
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shlex
+import shutil
 import signal
 from pathlib import Path
 
@@ -183,6 +184,58 @@ async def test_remote_watcher_cleans_runtime_after_supervisor_is_killed(
     async with asyncio.timeout(3):
         while list(runtime.iterdir()):
             await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_runtime_creation_cleans_runtime(
+    command_stack, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner, _inspector, _master, _paths = command_stack
+    runtime = tmp_path / "remote-runtime"
+    runtime.mkdir()
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    real_mkdir = shutil.which("mkdir")
+    assert real_mkdir is not None
+    fake_mkdir = fake_bin / "mkdir"
+    fake_mkdir.write_text(
+        f'#!/bin/sh\nset -eu\n{shlex.quote(real_mkdir)} "$@"\nsleep 0.2\n',
+        encoding="utf-8",
+    )
+    fake_mkdir.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+    monkeypatch.setenv("TMPDIR", str(runtime))
+    task = asyncio.create_task(runner.execute("exec sleep 10"))
+    async with asyncio.timeout(2):
+        while not list(runtime.iterdir()):
+            await asyncio.sleep(0.01)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert list(runtime.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_payload_copy_failure_does_not_orphan_fifo_reader(
+    command_stack, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner, _inspector, _master, _paths = command_stack
+    runtime = tmp_path / "remote-runtime"
+    runtime.mkdir()
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_dd = fake_bin / "dd"
+    fake_dd.write_text("#!/bin/sh\nexit 74\n", encoding="utf-8")
+    fake_dd.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+    monkeypatch.setenv("TMPDIR", str(runtime))
+
+    async with asyncio.timeout(2):
+        result = await runner.execute("exec sleep 10")
+
+    assert result.exit_code == 74
+    assert list(runtime.iterdir()) == []
 
 
 @pytest.mark.asyncio

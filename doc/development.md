@@ -2,27 +2,42 @@
 
 ## Local Workflow
 
-All Python dependencies live in the repository-local `venv/` and are ignored
-by Git. Use Make as the supported interface:
+Use Make as the supported interface. Ruff is installed from a hash-verified
+lock into the ignored `venv-lint/` so editors and `make format` can run it on
+the host. Checks that need the project environment run in a confined toolbox
+container instead:
 
 ```bash
-make venv
 make format
 make check
 ```
 
-`make check` runs Ruff lint and format validation, strict mypy analysis, Bandit
-security analysis, pytest across automatically selected parallel worker
-processes, Python compilation, Bash syntax, ShellCheck when installed, launcher
-tests, and an exact dependency-freeze comparison. `make ci` adds the online
-known-vulnerability scan performed by `pip-audit`.
+`make check` runs host Ruff lint and format validation, then runs strict mypy,
+Bandit, pytest, Python and Bash syntax, ShellCheck, and exact dependency-freeze
+validation in containers. `make ci` adds the online vulnerability scan. The
+work tree reaches containers as a tar stream; it is never bind-mounted.
 
-Pytest uses `pytest-xdist` with `-n auto --dist=worksteal`. Override the worker
-count for constrained environments by passing it explicitly, for example:
+Pytest uses `pytest-xdist` with `-n auto --dist=worksteal` and normally runs
+offline in the toolbox.
 
-```bash
-venv/bin/python -m pytest -n 4
-```
+### Host Exposure
+
+Creating `venv-lint/` still asks the host Python and pip to install third-party
+code. The contour is deliberately narrow: the lock contains one self-contained
+Ruff wheel, installation requires a recorded hash, and source distributions are
+refused. This is a smaller exposure than installing the runtime and test tree,
+but it is not zero.
+
+`make runtime-venv` is an explicit host installation, not a launcher side
+effect. It creates persistent `venv-runtime/`, installs only `requirements.txt`
+as hash-verified wheels, removes the bootstrap pip copy, and records that lock.
+The launcher refuses to run if the environment is absent or stale and never
+invokes pip itself.
+
+`make host-tests` is the narrower exception needed to drive Podman and real
+launcher subprocesses. It installs `requirements-dev.txt` into a temporary venv
+below `${TMPDIR:-/tmp}` and removes the entire environment on success, failure,
+or interruption. It never modifies `venv-runtime/`.
 
 ## Coverage
 
@@ -32,7 +47,7 @@ Every pytest run measures branch coverage of `remote_ssh_mcp` through
 `pyproject.toml` is the only place that stores the threshold; the Makefile and
 CI read it from there.
 
-The gate is `75`, chosen against a measured total of about `76.9%`. Repeated
+The gate is `75`, chosen against a measured total of about `77.1%`. Repeated
 runs are usually identical, but timing-sensitive branches in the transfer and
 master code can move the total by a few hundredths, so the gate keeps a margin
 for that and for refactors while still failing on a real regression. Raise it
@@ -48,16 +63,31 @@ make coverage-report
 
 The lowest-covered modules are `server.py` and `cli.py`, because the MCP STDIO
 main loop and argument-parser entry point are exercised mostly through the
-subprocess and live LXC tests, which run outside the coverage process.
+subprocess and live container tests, which run outside the coverage process.
 
 The test suite includes isolated configuration and path tests, fake OpenSSH and
-rsync processes, real MCP STDIO sessions, signal and cleanup behavior, launcher
-bootstrap, dependency refresh, and retry after failed installation.
+rsync processes, real MCP STDIO sessions, signal and cleanup behavior, explicit
+runtime validation, and dependency refresh.
+
+### The `host` Marker
+
+A few tests need the host itself rather than the code: they drive Podman on the
+machine, or they start real launcher subprocesses. Neither is
+available or meaningful inside a container, so they carry `@pytest.mark.host`
+and `pytest.ini` deselects them by default. The ordinary suite therefore runs
+offline in a container with nothing deselected for lack of a tool.
+
+`make host-tests` runs exactly that set, and `make live-fido-test` depends on
+it: the operator-run workflow is where host-level behaviour belongs.
+
+A marked test must still leave nothing behind. The host-test venv is ephemeral,
+and the launcher uses the separately prepared runtime without modifying it.
 
 ## Continuous Integration
 
 `.github/workflows/ci.yml` runs for pull requests targeting `main` and pushes to
-`main`. Its jobs provide four independent gates:
+`main`. Its workflow has four jobs; the live job starts only after quality
+passes:
 
 - `make ci` runs Ruff, strict mypy, Bandit, parallel pytest, syntax and shell
   checks, freeze validation, and `pip-audit` against the installed pinned tree;
@@ -65,9 +95,15 @@ bootstrap, dependency refresh, and retry after failed installation.
   known vulnerability of moderate or higher severity;
 - CodeQL analyzes Python with the `security-extended` query suite and uploads
   results to GitHub code scanning;
-- the live job installs the current stable LXD snap on a clean Ubuntu 26.04
-  runner and executes the automatic ephemeral-key `make live-test` after the
-  quality job succeeds.
+- the live job verifies that the runner has rootless Podman and executes the
+  automatic ephemeral-key `make live-test` after the quality job succeeds.
+
+Three independent OCI archives are cached by their content-derived image keys
+and runner architecture. The quality job restores the toolbox and resolver; the
+live job restores the same toolbox and the live target. A cache miss builds and
+exports only the missing image, so a change to one image neither invalidates nor
+transfers either of the others. Every load verifies that the archive restored
+the exact expected tag.
 
 Two of those jobs also report into the pull request itself:
 
@@ -86,7 +122,7 @@ workflow annotations directly, and `make typecheck` pipes mypy through
 into annotations and stays a transparent pass-through outside GitHub Actions.
 The pipeline keeps `pipefail`, so annotating never hides a failing tool.
 
-Bandit, pip-audit, ShellCheck, the freeze comparison, and the live LXC run stay
+Bandit, pip-audit, ShellCheck, the freeze comparison, and the live run stay
 log-only. They fail rarely, and their output is not addressed to a single line.
 
 Both comment paths need `pull-requests: write`, which the two jobs request
@@ -98,12 +134,9 @@ Dependency Review already downgrades an unwritable pull request to a warning. A
 missing comment therefore never changes a check result, and the identical
 report always remains in the job summary.
 
-The live job opens the host firewall for the LXD bridge before it runs. The
-hosted runner image ships a running Docker daemon, which sets the `FORWARD`
-policy to `DROP`. Bridged instance traffic is forwarded traffic, so without that
-step the test instance resolves names through `lxdbr0` and then reaches no
-archive at all, and provisioning fails inside apt rather than in anything this
-project owns.
+The live job needs no host firewall changes. Rootless Podman routes container
+traffic through its user-space network stack, so the workflow needs neither a
+privileged bridge nor forwarding-policy changes.
 
 Dependency Review additionally requires the repository dependency graph. While
 it is disabled the job fails with `Dependency review is not supported on this
@@ -114,44 +147,47 @@ the release version in a comment, in every workflow. Dependabot checks both
 Python dependencies and GitHub Actions weekly; see the dependency section below
 for why its Python updates are restricted. Dependency Review and CodeQL result
 upload require a public repository or GitHub Advanced Security when the
-repository is private.
-Ubuntu 26.04 is selected explicitly and might remain a GitHub public-preview
-runner until GitHub promotes the image to general availability. The
-`.github/actionlint.yaml` compatibility entry teaches actionlint `v1.7.12`
-about this newer official label without suppressing any other workflow checks.
+repository is private. All jobs select Ubuntu 26.04 explicitly.
+`.github/actionlint.yaml` registers that runner label for actionlint `v1.7.12`
+without suppressing any other workflow checks.
 
 The local equivalent, excluding GitHub-only Dependency Review and CodeQL result
 upload, is:
 
 ```bash
 make ci
+make runtime-venv
 make live-test
 ```
 
 ## Dependencies
 
-`pyproject.toml` is the human-maintained source for direct dependencies:
+Two manifests are human-maintained sources for direct dependencies:
 
 - `[project].dependencies` contains packages imported by runtime code;
-- `[project.optional-dependencies].dev` contains direct test, lint, type-check,
-  and security-audit tools;
+- `[project.optional-dependencies].dev` contains direct test, type-check, and
+  security-audit tools used by the toolbox and host tests;
+- `tools/lint/pyproject.toml` contains Ruff alone, without the runtime tree;
 - exact versions make dependency review explicit and easy to update.
 
-Two lock files are generated from it by `pip-compile`, and neither is ever
-edited by hand:
+Three lock files are generated by `pip-compile`, and none is ever edited by
+hand:
 
-- `requirements.txt` resolves `[project].dependencies` only. The launcher
-  installs this one, so an installed server carries no linter, type checker, or
-  test runner.
-- `requirements-dev.txt` resolves the same tree plus the `dev` extra. `make
-  venv` installs it on top, which is what every check runs against.
+- `requirements.txt` resolves `[project].dependencies` only. The explicit
+  `make runtime-venv` target installs this one, so an installed server carries
+  no linter, type checker, or test runner. The launcher only validates and uses
+  that prepared environment.
+- `requirements-dev.txt` resolves the same tree plus the `dev` extra. The
+  toolbox installs it; `make host-tests` uses it in one ephemeral host venv.
+- `requirements-lint.txt` resolves `tools/lint/pyproject.toml` and contains only
+  Ruff. `venv-lint/` installs it as wheels with mandatory hashes.
 
-Both files pin every transitive package and carry `--hash` lines for each one.
+All locks pin every transitive package and carry `--hash` lines for each one.
 Hashes put pip into hash-checking mode, so an artifact that does not match the
-recorded digest is refused rather than installed. Both files exclude the project
-itself, so neither contains a machine-specific local path.
+recorded digest is refused rather than installed. The locks exclude the project
+itself, so none contains a machine-specific local path.
 
-After changing a version in `pyproject.toml`, recompile:
+After changing a version in either manifest, recompile:
 
 ```bash
 make lock
@@ -160,38 +196,50 @@ make check
 
 `make lock` respects the pins that already satisfy `pyproject.toml`, so it
 changes only what your edit forced. To move the whole tree to current versions
-instead, rebuild from an empty environment:
+instead, request an upgrade resolution:
 
 ```bash
 make refresh-dependencies
 make check
 ```
 
-That target deletes `venv/`, creates it again, bootstraps `pip-tools`,
-recompiles both locks with `--upgrade`, installs the development lock, and
-updates the launcher's install markers.
+That target uses the isolated resolver image to recompile all three locks with
+`--upgrade`, deletes the persistent runtime and Ruff environments, and
+recreates only the Ruff venv. Reinstall the runtime explicitly with
+`make runtime-venv` before using the server again; host-test environments are
+always ephemeral.
 
-`make freeze-check` recompiles both locks into temporary copies and compares
+`make freeze-check` recompiles all three locks into temporary copies and compares
 them, ignoring comments. Because it does not pass `--upgrade`, a newly released
 version elsewhere on PyPI cannot make it fail; only a lock that no longer
-matches `pyproject.toml` can. It needs network access.
+matches its manifest can. It needs network access.
+
+Pip-tools itself lives in a minimal resolver stage rather than the main
+toolbox. That keeps the check image smaller and allows `make lock` to repair a
+development lock that can no longer build the toolbox image. Because a resolver
+cannot bootstrap from the lock it generates, its complete small dependency tree
+is pinned inline in the Containerfile and restricted to wheels. Full hash
+refreshes get a separate bounded 4 GiB temporary/memory allowance; ordinary
+checks retain the tighter toolbox limits.
 
 ### Automated Updates
 
-Dependabot recognises `pip-compile` output by the header the tool writes, and
-recompiles the whole tree rather than editing one pinned line. That distinction
-matters: a single edited line in a resolved tree is usually unsatisfiable.
-`pydantic` requires an exact `pydantic-core`, and `pydantic-core` publishes
-releases ahead of the stable `pydantic` that consumes them, so a lone bump of
-that transitive package fails in pip before any check can run.
+Dependabot uses the `pip-compile` header to understand how the lock was produced,
+but it can still classify a transitive lock entry as a direct dependency and
+edit only that pin. `pydantic` requires an exact `pydantic-core`, while core
+releases can precede the stable Pydantic release that consumes them, so a lone
+core bump is unsatisfiable. `.github/dependabot.yml` therefore ignores only
+independent `pydantic-core` updates. Core still moves with an intentional
+Pydantic update or `make refresh-dependencies`.
 
 Never remove the header, and never add `--no-header` to the compile flags. It is
-the only thing that tells Dependabot how the file was produced.
+the only metadata that tells Dependabot how the file was produced.
 
-Both locks keep the complete transitive tree in a file GitHub parses into the
-dependency graph. The graph is what gives Dependabot alerts and Dependency
-Review visibility into transitive packages, so shrinking these files to direct
-dependencies would silence the security signal along with the noise.
+The runtime and development locks keep the complete transitive tree in files
+GitHub parses into the dependency graph. The graph is what gives Dependabot
+alerts and Dependency Review visibility into transitive packages, so shrinking
+these files to direct dependencies would silence the security signal along with
+the noise.
 
 ## Documentation And Schemas
 
@@ -199,22 +247,31 @@ When changing a CLI option, tool, annotation, or security invariant, update the
 matching files under `doc/`, the examples under `doc/examples/`, and their
 schema/configuration tests. Keep `README.md` concise; details belong here.
 
-## Live LXC Tests
+## Live Container Tests
 
-Both live workflows create a uniquely named Debian LXC instance, run the same
-complete MCP black-box matrix, and delete the instance and temporary files on
-success, failure, or interruption. They change the local LXC daemon and must be
-run only on an authorized, disposable test host.
+Both live workflows build or reuse the content-addressed target image and keep
+the matrix driver on the host. The automatic workflow runs the MCP server and
+SSH target in separate containers on a private internal Podman network and
+publishes no target port. The FIDO workflow runs the server on the host, where
+OpenSSH can reach the hardware key, and publishes the target's SSH port on a
+random `127.0.0.1` port. They remove every owned container, private network, and
+temporary file on success, failure, or interruption. Images are retained as a
+build cache and can be removed with `make clean-containers`. The workflows need
+rootless Podman and no host privilege: no daemon or `sudo`.
 
 The automatic workflow creates an unencrypted Ed25519 key in a mode-`0700`
-temporary directory, installs only its public half in the test instance, and
-deletes both key files at exit. It needs no SSH prompt or operator action and is
-suitable for an isolated CI runner with access to LXC:
+temporary directory, installs only its public half in the target, and deletes
+both key files at exit. It needs no SSH prompt or operator action and is
+suitable for a CI runner:
 
 ```bash
+make runtime-venv
 make live-preflight
 make live-test
 ```
+
+The installation target is a separate prerequisite. Neither `live-test` nor
+`host-tests` invokes it implicitly.
 
 The FIDO workflow uses an existing hardware-backed OpenSSH key. Key paths are
 runtime parameters and must not be embedded in source, documentation, fixtures,
@@ -230,39 +287,47 @@ make live-fido-test \
   IDENTITY_FILE=/path/to/identity
 ```
 
-Use `LXC_IMAGE=...` with any of these targets to override the default
-`images:debian/13` image.
+The image is defined by `containers/live-target/` and pinned to a base image
+digest, so a run is reproducible and Dependabot can propose the base update.
 
-The shared harness initializes the container with:
+### Why The Target Is Confined The Way It Is
 
-```text
--c security.nesting=true
--c security.syscalls.intercept.mknod=true
--c security.syscalls.intercept.setxattr=true
--c security.idmap.size=1000000
--c security.devlxd=false
--c security.idmap.isolated=true
--c linux.kernel_modules=br_netfilter
-```
+The target runs as root inside rootless Podman's user namespace because it has
+to start sshd, manage the test account, and honour sudo. That root has no host
+root authority, no host path is mounted, and all capabilities remain namespaced.
 
-Before starting it, the harness applies this NIC override:
+Three hardening options are deliberately absent, and none should be added:
 
-```text
-lxc config device override <instance> eth0 security.mac_filtering=true \
-  security.ipv4_filtering=true security.ipv6_filtering=true
-```
+- `--userns=auto` is used by the toolbox but cannot be used for the live target:
+  sshd privilege separation calls `setgroups()` with a gid outside the narrow
+  auto mapping and fails before authentication;
+- `--security-opt=no-new-privileges` would neutralise the setuid `sudo` binary,
+  and passwordless sudo is part of the contract under test;
+- `--read-only` would stop sshd writing to `/run` and stop the matrix
+  installing a sudo policy per case.
 
-`linux.kernel_modules=br_netfilter` asks the LXC daemon to load the host module
-required by bridge IPv4/IPv6 filtering before the instance starts, without a
-separate sudo command. The harness verifies every instance and NIC setting
-after startup. It installs only the selected public key for the test account,
-constructs a protected temporary SSH configuration for the matching identity,
-and drives the MCP protocol itself.
+Everything else is dropped or bounded. The container starts with
+`--cap-drop=ALL` and regains only what the matrix provably needs: `SETUID`,
+`SETGID`, and `SYS_CHROOT` for sshd and sudo, `CHOWN`, `DAC_OVERRIDE`, and
+`FOWNER` to prepare fixtures, `KILL` for cleanup, `AUDIT_WRITE` for login
+records, `NET_BIND_SERVICE` to bind port 22, and `NET_ADMIN` for the `tc`
+rate limit that makes the cancel-and-resume transfer test deterministic.
+
+Podman rewrites `--cap-drop=ALL` into a delta against its own default set, so
+the declared configuration proves nothing. The harness reads `CapEff` from
+`/proc` inside the running container and fails if a forbidden capability is
+present or a required one is missing.
+
+The automatic target publishes no port. Only its confined server peer can reach
+port 22 through the per-run internal network. In FIDO mode the target is instead
+published on a random `127.0.0.1` port because the server and hardware-key-aware
+OpenSSH client run on the host. Any local user can reach that loopback port
+while the FIDO test runs; authentication remains public-key only.
 
 The matrix covers disconnected startup, strict schemas, commands, timeouts,
 bounded and binary output, inspection, unusual filenames, NOPASSWD sudo,
 password/cache refusal, policy denial, large upload/download, overwrite,
 cancellation, resume, hashes, concurrency, one authentication, one transport,
-master loss, and explicit disconnect. Cleanup removes the container and every
-temporary authentication, host-key, runtime, and transfer artifact on success
-or failure.
+master loss, and explicit disconnect. Cleanup removes the owned containers and
+network plus every temporary authentication, host-key, runtime, and transfer
+artifact on success or failure.

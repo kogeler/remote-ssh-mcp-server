@@ -539,11 +539,20 @@ class TransferManager:
         if operation.overwrite:
             command = f"mv -fT -- {partial} {final}"
         else:
-            command = f"ln -- {partial} {final} && rm -f -- {partial}"
+            command = (
+                f"if ln -- {partial} {final}; then\n"
+                f"  rm -f -- {partial} || exit 79\n"
+                f"elif test -e {final} || test -L {final}; then\n"
+                f"  rm -f -- {partial} || exit 79\n"
+                "  exit 80\n"
+                "else\n"
+                "  exit $?\n"
+                "fi"
+            )
         result = await self.runner.run_script(command)
         if result.exit_code == 0:
             return
-        if not operation.overwrite and await self._remote_exists(operation.remote_path):
+        if not operation.overwrite and result.exit_code == 80:
             raise RemoteMCPError(
                 "remote_path_exists", "remote destination already exists"
             )

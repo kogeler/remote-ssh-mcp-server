@@ -295,6 +295,7 @@ async def test_application_starts_disconnected_and_reports_connecting(
 
 
 @pytest.mark.asyncio
+@pytest.mark.host
 async def test_real_stdio_protocol_and_lifecycle_with_process_fakes(
     tmp_path: Path,
 ) -> None:
@@ -634,6 +635,7 @@ async def test_real_stdio_protocol_and_lifecycle_with_process_fakes(
 
 
 @pytest.mark.asyncio
+@pytest.mark.host
 async def test_sigterm_cleans_master_with_stdin_still_open(tmp_path: Path) -> None:
     fake_bin = tmp_path / "bin"
     install_process_fakes(fake_bin)
@@ -728,6 +730,7 @@ async def test_sigterm_cleans_master_with_stdin_still_open(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.host
 async def test_master_start_failure_is_concise_and_cleans_runtime(
     tmp_path: Path,
 ) -> None:

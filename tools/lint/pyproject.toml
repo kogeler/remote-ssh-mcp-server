@@ -1,0 +1,7 @@
+[project]
+name = "remote-ssh-mcp-lint-environment"
+version = "0"
+requires-python = ">=3.11"
+dependencies = [
+    "ruff==0.16.3",
+]

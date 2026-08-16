@@ -1,0 +1,17 @@
+venv/
+venv-runtime/
+venv-lint/
+.git/
+.artifacts/
+tmp/
+**/__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+coverage-report.md
+htmlcov/
+build/
+dist/
+*.egg-info/

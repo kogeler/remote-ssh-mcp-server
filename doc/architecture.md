@@ -90,20 +90,30 @@ MCP server restart.
 - **One master:** makes authentication reuse and ownership auditable.
 - **Rsync data plane:** streams and resumes large files without MCP payloads.
 - **`sudo -n -k`:** enforces cache-independent NOPASSWD behavior.
-- **Pinned local venv:** isolates Python dependencies and reproduces the tested
-  environment without a repository-wide system install.
+- **Explicit runtime installation:** `make runtime-venv` owns a persistent,
+  runtime-only host environment; the launcher validates and uses it but never
+  installs code.
+- **Split development environments:** Ruff alone has a hash-verified host venv
+  for editor integration, project-aware checks run in a confined toolbox, and
+  host-only tests use a temporary venv removed at exit.
 
 ## Repository Layout
 
 ```text
-remote-ssh-mcp              Bash launcher and venv bootstrapper
+remote-ssh-mcp              Bash runtime validator and launcher
 remote-ssh-mcp.py           Python executable entry point
 remote_ssh_mcp/             implementation package
 tests/                      local and opt-in live tests
+tests/live_harness.py       thin Podman live-test CLI
+tests/live_support/         live topology, SSH material, cleanup, and orchestration
 doc/                        user and maintainer documentation
 requirements.txt            hashed runtime dependency lock
 requirements-dev.txt        hashed runtime and development lock
-pyproject.toml              direct dependencies and project metadata
+requirements-lint.txt       hashed Ruff-only host-tool lock
+pyproject.toml              runtime/toolbox dependencies and project metadata
+tools/lint/pyproject.toml   isolated Ruff environment manifest
+containers/                 toolbox/resolver and live-target definitions
+make/                       shared container and live-test policy
 Makefile                    development and validation interface
 AGENTS.md                   agent navigation and invariants
 ```

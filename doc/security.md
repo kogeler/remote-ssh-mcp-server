@@ -93,7 +93,7 @@ Cleanup does not discover, adopt, or terminate unrelated SSH masters.
 - no automatic reconnect or unattended reauthentication;
 - no tunnel management or remote MCP network service;
 - no recursive sync, cross-remote transfer, or additional remote path sandbox;
-- single-file transfers target POSIX-like remote systems.
+- remote operations currently target Linux systems with GNU userland tools.
 
 Use an ordinary SSH client for workflows that genuinely require a PTY. Raw
 terminal streams are harder for agents to parse, bound, recover, and use for

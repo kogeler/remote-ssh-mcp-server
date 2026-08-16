@@ -1,157 +1,219 @@
 from __future__ import annotations
 
 import os
-import shutil
+import re
+import signal
 import subprocess
+import sys
+import time
 from pathlib import Path
 
+import pytest
+
+# The harness drives Podman on the machine, which a container cannot do.
+pytestmark = pytest.mark.host
+
 ROOT = Path(__file__).resolve().parents[1]
+HARNESS = ROOT / "tests/live_harness.py"
+FINGERPRINT = re.compile(r"fingerprint (SHA256:[A-Za-z0-9+/]+)")
+UNUSED_IMAGE = "localhost/unused:test"
 
 
-def make_executable(path: Path, content: str) -> None:
-    path.write_text(content, encoding="utf-8")
-    path.chmod(0o700)
-
-
-def read_record(path: Path) -> tuple[dict[str, str], list[str]]:
-    fields: dict[str, str] = {}
-    arguments: list[str] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        key, value = line.split("=", maxsplit=1)
-        if key == "argument":
-            arguments.append(value)
-        else:
-            fields[key] = value
-    return fields, arguments
-
-
-def test_automatic_live_wrapper_generates_unique_keys_and_removes_them(
-    tmp_path: Path,
-) -> None:
-    harness_dir = tmp_path / "harness"
-    key_parent = tmp_path / "keys"
-    harness_dir.mkdir()
-    key_parent.mkdir()
-    wrapper = harness_dir / "run-live-lxc.sh"
-    shutil.copy2(ROOT / "tests/run-live-lxc.sh", wrapper)
-    make_executable(
-        harness_dir / "run-live-lxc-core.sh",
-        """#!/usr/bin/env bash
-set -euo pipefail
-: "${FAKE_CORE_LOG:?}"
-arguments=("$@")
-mode=
-public_key=
-identity_file=
-while (( $# )); do
-    case "$1" in
-        --key-mode) mode=$2; shift 2 ;;
-        --public-key) public_key=$2; shift 2 ;;
-        --identity-file) identity_file=$2; shift 2 ;;
-        *) shift ;;
-    esac
-done
-[[ "$mode" == ephemeral ]]
-[[ -f "$public_key" && -f "$identity_file" ]]
-{
-    printf 'mode=%s\n' "$mode"
-    printf 'public_key=%s\n' "$public_key"
-    printf 'identity_file=%s\n' "$identity_file"
-    printf 'key_type=%s\n' "$(awk 'NR == 1 { print $1 }' "$public_key")"
-    printf 'fingerprint=%s\n' "$(ssh-keygen -lf "$public_key" | awk '{ print $2 }')"
-    printf 'public_mode=%s\n' "$(stat -c %a "$public_key")"
-    printf 'identity_mode=%s\n' "$(stat -c %a "$identity_file")"
-    printf 'argument=%s\n' "${arguments[@]}"
-} > "$FAKE_CORE_LOG"
-""",
-    )
-
-    records: list[dict[str, str]] = []
-    for attempt in range(2):
-        log = tmp_path / f"core-{attempt}.log"
-        environment = os.environ.copy()
-        environment.update(FAKE_CORE_LOG=str(log), TMPDIR=str(key_parent))
-        completed = subprocess.run(
-            [str(wrapper), "--preflight-only", "--image", "test-image"],
-            capture_output=True,
-            check=False,
-            env=environment,
-            text=True,
-        )
-        assert completed.returncode == 0, completed.stderr
-        record, arguments = read_record(log)
-        assert record["mode"] == "ephemeral"
-        assert record["key_type"] == "ssh-ed25519"
-        assert record["public_mode"] == "600"
-        assert record["identity_mode"] == "600"
-        assert not Path(record["public_key"]).exists()
-        assert not Path(record["identity_file"]).exists()
-        assert arguments[-3:] == ["--image", "test-image", "--preflight-only"]
-        records.append(record)
-
-    assert records[0]["fingerprint"] != records[1]["fingerprint"]
-    assert not any(key_parent.iterdir())
-
-
-def test_fido_live_wrapper_selects_fido_mode_and_forwards_allowed_arguments(
-    tmp_path: Path,
-) -> None:
-    wrapper = tmp_path / "run-live-fido-lxc.sh"
-    shutil.copy2(ROOT / "tests/run-live-fido-lxc.sh", wrapper)
-    make_executable(
-        tmp_path / "run-live-lxc-core.sh",
-        """#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "$@" > "${FAKE_CORE_LOG:?}"
-""",
-    )
-    log = tmp_path / "core.log"
+def run_harness(
+    *arguments: str, tmpdir: Path | None = None
+) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
-    environment["FAKE_CORE_LOG"] = str(log)
-
-    completed = subprocess.run(
-        [
-            str(wrapper),
-            "--public-key",
-            "/runtime/key.pub",
-            "--identity-file",
-            "/runtime/key",
-            "--image",
-            "test-image",
-            "--preflight-only",
-        ],
+    if tmpdir is not None:
+        environment["TMPDIR"] = str(tmpdir)
+    return subprocess.run(
+        [sys.executable, str(HARNESS), *arguments],
         capture_output=True,
         check=False,
         env=environment,
         text=True,
     )
 
-    assert completed.returncode == 0, completed.stderr
-    assert log.read_text(encoding="utf-8").splitlines() == [
-        "--key-mode",
-        "fido",
+
+def test_ephemeral_preflight_generates_a_unique_key_and_removes_it(
+    tmp_path: Path,
+) -> None:
+    key_parent = tmp_path / "keys"
+    key_parent.mkdir()
+
+    fingerprints: list[str] = []
+    for _attempt in range(2):
+        completed = run_harness(
+            "--mode",
+            "ephemeral",
+            "--image",
+            UNUSED_IMAGE,
+            "--preflight-only",
+            tmpdir=key_parent,
+        )
+        assert completed.returncode == 0, completed.stderr
+        match = FINGERPRINT.search(completed.stderr)
+        assert match is not None, completed.stderr
+        fingerprints.append(match.group(1))
+        assert "mode ephemeral" in completed.stderr
+        assert "key ssh-ed25519" in completed.stderr
+
+    # A fresh key for every run, and nothing of it survives the run.
+    assert fingerprints[0] != fingerprints[1]
+    assert not any(key_parent.iterdir())
+
+
+def test_ephemeral_mode_refuses_supplied_key_paths(tmp_path: Path) -> None:
+    completed = run_harness(
+        "--mode",
+        "ephemeral",
+        "--image",
+        UNUSED_IMAGE,
         "--public-key",
         "/runtime/key.pub",
-        "--identity-file",
-        "/runtime/key",
-        "--image",
-        "test-image",
         "--preflight-only",
-    ]
-
-
-def test_live_wrappers_reject_key_mode_injection() -> None:
-    attempts = (
-        (ROOT / "tests/run-live-lxc.sh", "--identity-file"),
-        (ROOT / "tests/run-live-fido-lxc.sh", "--key-mode"),
+        tmpdir=tmp_path,
     )
 
-    for wrapper, option in attempts:
-        completed = subprocess.run(
-            [str(wrapper), option, "ephemeral"],
-            capture_output=True,
-            check=False,
-            text=True,
-        )
-        assert completed.returncode != 0
-        assert f"unknown argument: {option}" in completed.stderr
+    assert completed.returncode != 0
+    assert "ephemeral mode generates its own key" in completed.stderr
+
+
+def test_fido_mode_requires_a_hardware_key(tmp_path: Path) -> None:
+    completed = run_harness(
+        "--mode",
+        "fido",
+        "--image",
+        UNUSED_IMAGE,
+        "--preflight-only",
+        tmpdir=tmp_path,
+    )
+
+    assert completed.returncode != 0
+    assert "fido mode requires --public-key" in completed.stderr
+
+
+def test_fido_mode_rejects_a_standard_key(tmp_path: Path) -> None:
+    identity = tmp_path / "id_ed25519"
+    subprocess.run(
+        ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(identity)],
+        check=True,
+    )
+
+    completed = run_harness(
+        "--mode",
+        "fido",
+        "--image",
+        UNUSED_IMAGE,
+        "--public-key",
+        f"{identity}.pub",
+        "--identity-file",
+        str(identity),
+        "--preflight-only",
+        tmpdir=tmp_path,
+    )
+
+    assert completed.returncode != 0
+    assert "not a supported OpenSSH FIDO2 key" in completed.stderr
+
+
+def test_fido_mode_rejects_a_server_container() -> None:
+    completed = run_harness(
+        "--mode",
+        "fido",
+        "--image",
+        UNUSED_IMAGE,
+        "--server-image",
+        UNUSED_IMAGE,
+        "--preflight-only",
+    )
+
+    assert completed.returncode != 0
+    assert "hardware key on this host" in completed.stderr
+
+
+def test_harness_rejects_unknown_arguments() -> None:
+    completed = run_harness("--image", UNUSED_IMAGE, "--key-mode", "ephemeral")
+
+    assert completed.returncode != 0
+    assert "unrecognized arguments: --key-mode ephemeral" in completed.stderr
+    assert "cleanup complete (status 2)" in completed.stderr
+
+
+def test_harness_terminates_an_active_child_on_signal(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    child_pid = tmp_path / "child.pid"
+    network_name = tmp_path / "network.name"
+    fake_podman = fake_bin / "podman"
+    fake_podman.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  "info") exit 0 ;;
+  "info --format {{.Host.Security.Rootless}}") printf 'true\\n' ;;
+  "image exists "*) exit 0 ;;
+  "network create "*)
+    printf '%s\\n' "$BASHPID" > "$FAKE_CHILD_PID"
+    printf '%s\\n' "${@: -1}" > "$FAKE_NETWORK_NAME"
+    trap 'exit 143' TERM
+    while true; do sleep 1; done
+    ;;
+  "network exists "*) exit 1 ;;
+  *) printf 'unexpected fake Podman call: %s\\n' "$*" >&2; exit 99 ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    fake_podman.chmod(0o700)
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PODMAN": str(fake_podman),
+            "FAKE_CHILD_PID": str(child_pid),
+            "FAKE_NETWORK_NAME": str(network_name),
+            "REMOTE_SSH_MCP_LIVE_TARGET_CONFINE": "--cap-drop=ALL",
+            "REMOTE_SSH_MCP_LIVE_SERVER_CONFINE": "--cap-drop=ALL",
+            "TMPDIR": str(tmp_path),
+        }
+    )
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            str(HARNESS),
+            "--mode",
+            "ephemeral",
+            "--image",
+            UNUSED_IMAGE,
+            "--server-image",
+            UNUSED_IMAGE,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=environment,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not child_pid.exists():
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                raise AssertionError(
+                    f"harness exited before the signal: {stdout=} {stderr=}"
+                )
+            if time.monotonic() >= deadline:
+                raise AssertionError("harness did not start the blocking child")
+            time.sleep(0.02)
+
+        process.send_signal(signal.SIGTERM)
+        _stdout, stderr = process.communicate(timeout=8)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+    assert process.returncode == 143
+    assert "cleanup complete (status 143)" in stderr
+    pid = int(child_pid.read_text(encoding="utf-8"))
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    assert not list(tmp_path.glob("remote-ssh-mcp-live-key.*"))

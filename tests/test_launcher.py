@@ -1,32 +1,20 @@
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
-FAKE_PYTHON = r"""#!/usr/bin/env bash
+import pytest
+
+FAKE_RUNTIME_PYTHON = r"""#!/usr/bin/env bash
 set -euo pipefail
+entry_point=${1:?missing entry point}
+shift
+exec "$entry_point" "$@"
+"""
 
-if [[ ${1:-} == -m && ${2:-} == venv ]]; then
-    target=${3:?missing venv target}
-    mkdir -p "$target/bin"
-    cp -- "$0" "$target/bin/python"
-    printf '%s\n' ':' > "$target/bin/activate"
-    exit 0
-fi
-
-if [[ ${1:-} == -m && ${2:-} == pip && ${3:-} == install ]]; then
-    printf '%s\n' install >> "${FAKE_PIP_LOG:?missing fake pip log}"
-    if [[ ${FAKE_PIP_FAIL:-0} == 1 ]]; then
-        exit 42
-    fi
-    exit 0
-fi
-
-printf 'unexpected fake Python invocation:' >&2
-printf ' <%s>' "$@" >&2
-printf '\n' >&2
+FORBIDDEN_SYSTEM_PYTHON = r"""#!/usr/bin/env bash
+printf '%s\n' invoked >> "${FORBIDDEN_PYTHON_LOG:?missing invocation log}"
 exit 99
 """
 
@@ -51,19 +39,29 @@ def isolated_launcher(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
     fake_bin.mkdir()
 
     launcher = repository / "remote-ssh-mcp"
-    shutil.copy2(source, launcher)
+    launcher.write_bytes(source.read_bytes())
+    launcher.chmod(source.stat().st_mode & 0o777)
     write_executable(tool / "remote-ssh-mcp.py", FAKE_ENTRY_POINT)
     (tool / "requirements.txt").write_text("dependency==1\n", encoding="utf-8")
-    write_executable(fake_bin / "python3", FAKE_PYTHON)
+    write_executable(fake_bin / "python3", FORBIDDEN_SYSTEM_PYTHON)
 
     environment = os.environ.copy()
     environment.update(
         {
             "PATH": f"{fake_bin}:{environment['PATH']}",
-            "FAKE_PIP_LOG": str(tmp_path / "pip.log"),
+            "FORBIDDEN_PYTHON_LOG": str(tmp_path / "python.log"),
         }
     )
     return launcher, tool, environment
+
+
+def install_fake_runtime(tool: Path) -> None:
+    runtime = tool / "venv-runtime"
+    (runtime / "bin").mkdir(parents=True)
+    write_executable(runtime / "bin/python", FAKE_RUNTIME_PYTHON)
+    (runtime / ".requirements.txt").write_bytes(
+        (tool / "requirements.txt").read_bytes()
+    )
 
 
 def run_launcher(
@@ -82,13 +80,20 @@ def run_launcher(
     )
 
 
-def test_launcher_bootstraps_forwards_arguments_and_skips_matching_freeze(
+def test_launcher_requires_explicit_runtime_and_forwards_arguments(
     tmp_path: Path,
 ) -> None:
     launcher, tool, environment = isolated_launcher(tmp_path)
     unrelated_cwd = tmp_path / "unrelated cwd"
     unrelated_cwd.mkdir()
 
+    missing = run_launcher(launcher, unrelated_cwd, environment, "--help")
+    assert missing.returncode != 0
+    assert "run: make runtime-venv" in missing.stderr
+    assert not (tmp_path / "python.log").exists()
+    assert not (tool / "venv-runtime").exists()
+
+    install_fake_runtime(tool)
     first = run_launcher(
         launcher,
         unrelated_cwd,
@@ -99,48 +104,39 @@ def test_launcher_bootstraps_forwards_arguments_and_skips_matching_freeze(
     )
     assert first.returncode == 0, first.stderr
     assert first.stdout == "argc=3\n<--option>\n<value with spaces>\n<>\n"
-    assert "Creating virtual environment" in first.stderr
-    assert "Installing dependencies" in first.stderr
-    assert (tool / "venv/.requirements.txt").read_bytes() == (
-        tool / "requirements.txt"
-    ).read_bytes()
+    assert first.stderr == ""
 
     second = run_launcher(launcher, tool, environment, "--help")
     assert second.returncode == 0, second.stderr
-    assert "Installing dependencies" not in second.stderr
-    assert (tmp_path / "pip.log").read_text(encoding="utf-8").splitlines() == [
-        "install"
-    ]
+    assert not (tmp_path / "python.log").exists()
 
 
-def test_failed_dependency_refresh_is_retried_on_next_launch(tmp_path: Path) -> None:
+def test_launcher_rejects_stale_runtime_without_modifying_it(tmp_path: Path) -> None:
     launcher, tool, environment = isolated_launcher(tmp_path)
-    initial = run_launcher(launcher, tmp_path, environment)
-    assert initial.returncode == 0, initial.stderr
-    old_marker = (tool / "venv/.requirements.txt").read_bytes()
+    install_fake_runtime(tool)
+    marker = tool / "venv-runtime/.requirements.txt"
+    old_marker = marker.read_bytes()
 
     (tool / "requirements.txt").write_text("dependency==2\n", encoding="utf-8")
-    failing_environment = {**environment, "FAKE_PIP_FAIL": "1"}
-    failed = run_launcher(launcher, tmp_path, failing_environment)
+    failed = run_launcher(launcher, tmp_path, environment)
     assert failed.returncode != 0
-    assert "will be retried on the next run" in failed.stderr
-    assert (tool / "venv/.requirements.txt").read_bytes() == old_marker
+    assert "Runtime environment is stale" in failed.stderr
+    assert "run: make runtime-venv" in failed.stderr
+    assert marker.read_bytes() == old_marker
+    assert not (tmp_path / "python.log").exists()
 
-    retried = run_launcher(launcher, tmp_path, environment)
-    assert retried.returncode == 0, retried.stderr
-    assert (tool / "venv/.requirements.txt").read_bytes() == b"dependency==2\n"
-    assert (tmp_path / "pip.log").read_text(encoding="utf-8").splitlines() == [
-        "install",
-        "install",
-        "install",
-    ]
+    marker.write_bytes((tool / "requirements.txt").read_bytes())
+    current = run_launcher(launcher, tmp_path, environment)
+    assert current.returncode == 0, current.stderr
 
 
+@pytest.mark.host
 def test_public_launcher_help_works_from_unrelated_directory(tmp_path: Path) -> None:
-    launcher = Path(__file__).resolve().parents[1] / "remote-ssh-mcp"
+    """Prove the prepared runtime works without the repository as cwd."""
+    source = Path(__file__).resolve().parents[1]
 
     completed = subprocess.run(
-        [launcher, "--help"],
+        [source / "remote-ssh-mcp", "--help"],
         cwd=tmp_path,
         text=True,
         capture_output=True,
@@ -150,3 +146,21 @@ def test_public_launcher_help_works_from_unrelated_directory(tmp_path: Path) -> 
     assert completed.returncode == 0, completed.stderr
     assert "--local-root" in completed.stdout
     assert "--target" not in completed.stdout
+    assert (source / "venv-runtime/.requirements.txt").read_bytes() == (
+        source / "requirements.txt"
+    ).read_bytes()
+
+    pip_probe = subprocess.run(
+        [
+            source / "venv-runtime/bin/python",
+            "-c",
+            (
+                "import importlib.util, sys; "
+                "sys.exit(importlib.util.find_spec('pip') is not None)"
+            ),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert pip_probe.returncode == 0, pip_probe.stderr

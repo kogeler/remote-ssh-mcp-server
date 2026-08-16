@@ -65,6 +65,9 @@ partial names allow the same source/destination pair to resume. The source and
 partial are compared with SHA-256 before final publication. Downloads publish
 atomically inside the local root; uploads publish through a same-directory
 remote rename or link. Existing final paths require `overwrite=true`.
+If a no-overwrite upload destination appears after the initial check, the
+atomic link fails, its now-useless remote partial is removed, and the operation
+reports `remote_path_exists` only after that cleanup finishes.
 
 Transfers are single-file operations. They never use sudo. Active concurrency
 is limited by `--max-transfers`, and each active destination is exclusively
