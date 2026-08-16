@@ -12,6 +12,7 @@
 
 PODMAN ?= podman
 ARTIFACTS := .artifacts
+IMAGE_ARTIFACTS := $(ARTIFACTS)/images
 
 # The tag is derived from everything that goes into the build, so an unchanged
 # context always resolves to an image that is already present, and a changed one
@@ -71,6 +72,42 @@ BOX_CONFINE = \
 # Only the targets that resolve dependencies may reach the network.
 BOX_ONLINE = $(subst --network=none,--network=slirp4netns,$(BOX_CONFINE))
 
+# The automatic live server uses the same user namespace, privilege, filesystem,
+# resource, and environment policy as the toolbox. Its lifecycle and internal
+# network are managed by the live harness, while a private home tmpfs holds the
+# generated OpenSSH configuration on the otherwise read-only root filesystem.
+LIVE_SERVER_CONFINE = \
+	$(subst --env HOME=/tmp/home,--env HOME=/home/box,\
+		$(filter-out --rm --interactive --network=none,$(BOX_CONFINE))) \
+	--mount=type=tmpfs,destination=/home/box,tmpfs-size=16777216,tmpfs-mode=0700,chown=true
+
+# The SSH target needs root inside rootless Podman's user namespace, setuid
+# sudo, and writable system paths. These are the measured minimum privileges
+# for sshd plus the fixture and rate-limit operations exercised by the matrix.
+LIVE_TARGET_CONFINE = \
+	--pull=never \
+	--cap-drop=ALL \
+	--cap-add=AUDIT_WRITE \
+	--cap-add=CHOWN \
+	--cap-add=DAC_OVERRIDE \
+	--cap-add=FOWNER \
+	--cap-add=KILL \
+	--cap-add=NET_ADMIN \
+	--cap-add=NET_BIND_SERVICE \
+	--cap-add=SETGID \
+	--cap-add=SETUID \
+	--cap-add=SYS_CHROOT \
+	--ipc=private \
+	--pid=private \
+	--uts=private \
+	--cgroupns=private \
+	--systemd=false \
+	--pids-limit=512 \
+	--memory=1g \
+	--memory-swap=1g \
+	--log-driver=k8s-file \
+	--tmpfs=/tmp:rw,nosuid,nodev,size=512m,mode=1777
+
 # A full --upgrade hash refresh downloads artifacts for every supported wheel.
 # Keep that burst isolated and bounded without constraining ordinary checks to
 # the resolver's larger temporary workspace.
@@ -82,6 +119,9 @@ LOCK_ONLINE = $(subst --memory=2g,--memory=4g,\
 # files the checkout does not exclude. Local edits survive; build output,
 # caches, the virtual environment, and .git never enter a container.
 BOX_ARCHIVE = git ls-files --cached --others --exclude-standard -z \
+	| while IFS= read -r -d '' path; do \
+		if [[ -e "$$path" || -L "$$path" ]]; then printf '%s\0' "$$path"; fi; \
+	done \
 	| sort -z \
 	| tar --create --file=- --null --verbatim-files-from --files-from=-
 
@@ -93,7 +133,9 @@ BOX_RUN_ONLINE = @$(BOX_ARCHIVE) | $(PODMAN) run $(BOX_ONLINE) $(TOOLBOX_TAG)
 BOX_COLLECT = @mkdir -p $(ARTIFACTS); $(BOX_ARCHIVE) | \
 	$(PODMAN) run $(BOX_CONFINE) --env BOX_EXPORT="$(BOX_EXPORT)" $(TOOLBOX_TAG)
 
-.PHONY: images toolbox-image lock-image live-target-image image-key image-save image-load \
+.PHONY: images toolbox-image lock-image live-target-image image-key \
+	image-save image-save-toolbox image-save-resolver image-save-target \
+	image-load image-load-toolbox image-load-resolver image-load-target \
 	doctor clean-containers
 
 images: toolbox-image live-target-image
@@ -129,21 +171,52 @@ live-target-image:
 # context that produced it.
 # Emitted as key=value lines so a workflow can consume them directly.
 image-key:
-	@printf 'toolbox=%s\ntarget=%s\n' '$(TOOLBOX_KEY)' '$(TARGET_KEY)'
+	@printf 'toolbox=%s\nresolver=%s\ntarget=%s\n' \
+		'$(TOOLBOX_KEY)' '$(LOCK_KEY)' '$(TARGET_KEY)'
 
-image-save: images
-	@mkdir -p $(ARTIFACTS)
-	@$(PODMAN) save --quiet --format oci-archive \
-		--output $(ARTIFACTS)/toolbox.tar $(TOOLBOX_TAG)
-	@$(PODMAN) save --quiet --format oci-archive \
-		--output $(ARTIFACTS)/live-target.tar $(TARGET_TAG)
+# Each archive has its own key and consumer in CI. Save through a temporary file
+# so a failed export can never leave an apparently cacheable partial archive.
+define save_image
+	@mkdir -p $(IMAGE_ARTIFACTS)
+	@temporary='$(1).tmp.'$$$$; \
+		trap 'rm -f "$$temporary"' EXIT; \
+		$(PODMAN) save --quiet --format oci-archive \
+			--output "$$temporary" '$(2)'; \
+		mv -f "$$temporary" '$(1)'
+endef
 
-image-load:
-	@for archive in $(ARTIFACTS)/toolbox.tar $(ARTIFACTS)/live-target.tar; do \
-		if [[ -r "$$archive" ]]; then \
-			$(PODMAN) load --quiet --input "$$archive" >/dev/null; \
-		fi; \
-	done
+define load_image
+	@test -r '$(1)' || { \
+		printf 'cached image archive is missing: %s\n' '$(1)' >&2; exit 1; \
+	}
+	@$(PODMAN) load --quiet --input '$(1)' >/dev/null
+	@$(PODMAN) image exists '$(2)' || { \
+		printf 'cached archive did not restore expected image: %s\n' '$(2)' >&2; \
+		exit 1; \
+	}
+endef
+
+image-save: image-save-toolbox image-save-resolver image-save-target
+
+image-save-toolbox: toolbox-image
+	$(call save_image,$(IMAGE_ARTIFACTS)/toolbox.tar,$(TOOLBOX_TAG))
+
+image-save-resolver: lock-image
+	$(call save_image,$(IMAGE_ARTIFACTS)/resolver.tar,$(LOCK_TAG))
+
+image-save-target: live-target-image
+	$(call save_image,$(IMAGE_ARTIFACTS)/live-target.tar,$(TARGET_TAG))
+
+image-load: image-load-toolbox image-load-resolver image-load-target
+
+image-load-toolbox:
+	$(call load_image,$(IMAGE_ARTIFACTS)/toolbox.tar,$(TOOLBOX_TAG))
+
+image-load-resolver:
+	$(call load_image,$(IMAGE_ARTIFACTS)/resolver.tar,$(LOCK_TAG))
+
+image-load-target:
+	$(call load_image,$(IMAGE_ARTIFACTS)/live-target.tar,$(TARGET_TAG))
 
 doctor:
 	@$(PODMAN) info >/dev/null 2>&1 || { \

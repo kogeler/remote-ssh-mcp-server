@@ -36,7 +36,8 @@ def test_public_repository_is_self_contained() -> None:
         ".github/actionlint.yaml",
         ".github/scripts/pr-comment.sh",
         ".github/scripts/annotate-diagnostics.sh",
-        "tests/live-target.sh",
+        "tests/live_harness.py",
+        "tests/live_support",
         "tests/live_podman_e2e.py",
         "containers/toolbox/Containerfile",
         "containers/toolbox/entrypoint.sh",
@@ -48,7 +49,7 @@ def test_public_repository_is_self_contained() -> None:
         assert (root / relative).exists(), relative
     for executable in (
         "remote-ssh-mcp",
-        "tests/live-target.sh",
+        "tests/live_harness.py",
         "containers/toolbox/entrypoint.sh",
         "containers/live-target/entrypoint.sh",
         ".github/scripts/pr-comment.sh",
@@ -71,8 +72,24 @@ def test_github_ci_triggers_main_and_pins_every_action() -> None:
     # Ruff runs in its own host venv while project-aware checks stay confined.
     assert "Set up Python for Ruff" in workflow
     assert "cache-dependency-path: requirements-lint.txt" in workflow
-    assert "make image-load" in workflow
-    assert "make image-save" in workflow
+    for image in ("toolbox", "resolver", "target"):
+        assert f"steps.images.outputs.{image}" in workflow
+    assert workflow.count("id: toolbox-cache") == 2
+    assert workflow.count("id: resolver-cache") == 1
+    assert workflow.count("id: target-cache") == 1
+    assert workflow.count("path: .artifacts/images/toolbox.tar") == 2
+    assert workflow.count("path: .artifacts/images/resolver.tar") == 1
+    assert workflow.count("path: .artifacts/images/live-target.tar") == 1
+    assert "${{ runner.arch }}" in workflow
+    for target in (
+        "image-load-toolbox",
+        "image-load-resolver",
+        "image-load-target",
+        "image-save-toolbox",
+        "image-save-resolver",
+        "image-save-target",
+    ):
+        assert f"make {target}" in workflow
     assert "queries: security-extended" in workflow
     assert "comment-summary-in-pr" in workflow
     assert ".github/scripts/pr-comment.sh coverage" in workflow
@@ -116,10 +133,13 @@ def test_dependabot_watches_both_ecosystems() -> None:
     assert ecosystems == {"pip", "github-actions"}
     for update in configuration["updates"]:
         assert update["schedule"]["interval"] == "weekly"
-        # A restricted allow list belongs to hand-written requirement files.
-        # pip-compile output is recompiled as a whole, so nothing needs to be
-        # withheld from Dependabot here.
         assert "allow" not in update
+    python_updates = next(
+        update
+        for update in configuration["updates"]
+        if update["package-ecosystem"] == "pip"
+    )
+    assert python_updates["ignore"] == [{"dependency-name": "pydantic-core"}]
 
 
 def test_github_code_owner_covers_the_entire_repository() -> None:
@@ -132,9 +152,16 @@ def test_github_code_owner_covers_the_entire_repository() -> None:
     assert rules == ["* @kogeler"]
 
 
-def test_live_target_runs_confined() -> None:
+def test_live_topologies_run_confined() -> None:
     root = Path(__file__).resolve().parents[1]
-    harness = (root / "tests/live-target.sh").read_text(encoding="utf-8")
+    harness_entrypoint = root / "tests/live_harness.py"
+    support_modules = sorted((root / "tests/live_support").glob("*.py"))
+    harness = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (harness_entrypoint, *support_modules)
+    )
+    policy = (root / "make/container.mk").read_text(encoding="utf-8")
+    live_makefile = (root / "make/live.mk").read_text(encoding="utf-8")
     entrypoint = (root / "containers/live-target/entrypoint.sh").read_text(
         encoding="utf-8"
     )
@@ -142,15 +169,30 @@ def test_live_target_runs_confined() -> None:
         encoding="utf-8"
     )
 
+    assert len(harness_entrypoint.read_text(encoding="utf-8").splitlines()) <= 20
+    assert support_modules
+    assert all(
+        len(module.read_text(encoding="utf-8").splitlines()) <= 450
+        for module in support_modules
+    )
+    assert "Path(__file__).resolve().parents[2]" in harness
+    assert 'TOOL_ROOT / "tests/live_podman_e2e.py"' in harness
+    assert "local_root.mkdir(mode=0o700)" in harness
+    assert '(local_root / "downloads").mkdir(mode=0o700)' in harness
+    assert 'stderr_path = local_root / "server.stderr"' in harness
+
     # Rootless is the isolation boundary: it is what makes the target's root
     # harmless on the host.
     assert "rootless Podman is required" in harness
-    assert "--cap-drop=ALL" in harness
+    target_policy = policy.split("LIVE_TARGET_CONFINE =", maxsplit=1)[1].split(
+        "# A full", maxsplit=1
+    )[0]
+    assert "--cap-drop=ALL" in target_policy
     # --userns=auto belongs to the toolbox only: sshd's privilege separation
     # cannot call setgroups() inside a narrow auto-allocated map. Match the
     # flag as it would be passed, so the comment explaining its absence does
     # not satisfy the check.
-    assert "\n    --userns=" not in harness
+    assert "--userns=" not in target_policy
     for capability in (
         "AUDIT_WRITE",
         "CHOWN",
@@ -163,7 +205,7 @@ def test_live_target_runs_confined() -> None:
         "SETUID",
         "SYS_CHROOT",
     ):
-        assert f"--cap-add={capability}" in harness
+        assert f"--cap-add={capability}" in target_policy
 
     # Podman rewrites --cap-drop=ALL into a delta against its own default set,
     # so the declared configuration proves nothing and the granted mask is
@@ -180,7 +222,6 @@ def test_live_target_runs_confined() -> None:
         assert forbidden in harness
 
     for setting in (
-        "--publish 127.0.0.1::22",
         "--pids-limit=512",
         "--ipc=private",
         "--pid=private",
@@ -188,7 +229,19 @@ def test_live_target_runs_confined() -> None:
         "--systemd=false",
         "--log-driver=k8s-file",
     ):
-        assert setting in harness
+        assert setting in target_policy
+
+    # Automatic live uses the toolbox policy and archive channel, puts both
+    # containers on one internal network, and publishes no target port.
+    assert "LIVE_SERVER_CONFINE" in policy
+    assert "$(filter-out --rm --interactive --network=none,$(BOX_CONFINE))" in policy
+    assert "--internal" in harness
+    assert "the automatic target published its SSH port" in harness
+    assert "live-test: toolbox-image live-target-image" in live_makefile
+    assert "$(BOX_ARCHIVE)" in live_makefile
+    assert "--server-image $(TOOLBOX_TAG)" in live_makefile
+    assert "/usr/local/sbin/toolbox-entrypoint" in harness
+    assert "podman cp" not in harness
 
     # Host keys are generated per container, so no key material can reach an
     # image layer.
@@ -223,6 +276,7 @@ def test_toolbox_runs_confined_and_never_mounts_the_work_tree() -> None:
     assert "--volume" not in policy
     assert " -v " not in policy
     assert "git ls-files --cached --others --exclude-standard" in policy
+    assert '[[ -e "$$path" || -L "$$path" ]]' in policy
 
     # A container that cannot prove its own confinement does no work.
     for proof in ("CapEff", "NoNewPrivs", "Seccomp", "id -u"):
@@ -267,6 +321,34 @@ def test_toolbox_runs_confined_and_never_mounts_the_work_tree() -> None:
         "wheel==0.48.0",
     ):
         assert resolver_package in containerfile
+
+
+def test_container_image_caches_are_independent_and_verified() -> None:
+    root = Path(__file__).resolve().parents[1]
+    policy = (root / "make/container.mk").read_text(encoding="utf-8")
+
+    image_key = policy.split("image-key:", maxsplit=1)[1].split(
+        "# Each archive", maxsplit=1
+    )[0]
+    for name, key in (
+        ("toolbox", "$(TOOLBOX_KEY)"),
+        ("resolver", "$(LOCK_KEY)"),
+        ("target", "$(TARGET_KEY)"),
+    ):
+        assert f"{name}=%s" in image_key
+        assert key in image_key
+
+    assert (
+        "image-save: image-save-toolbox image-save-resolver image-save-target" in policy
+    )
+    assert (
+        "image-load: image-load-toolbox image-load-resolver image-load-target" in policy
+    )
+    for archive in ("toolbox.tar", "resolver.tar", "live-target.tar"):
+        assert f"$(IMAGE_ARTIFACTS)/{archive}" in policy
+    assert "cached image archive is missing" in policy
+    assert "cached archive did not restore expected image" in policy
+    assert ".tmp." in policy
 
 
 def read_lock(path: Path) -> dict[str, str]:
@@ -391,7 +473,7 @@ def test_make_checks_every_lock_and_keeps_live_runtime_only() -> None:
     assert 'sed "/^[[:space:]]*#/d"' in freeze_recipe
     assert "chmod 0644 $(RUNTIME_LOCK) $(DEVELOPMENT_LOCK) $(LINT_LOCK)" in makefile
     assert "python -m pytest || status=$$?" in makefile
-    assert "live-test: live-target-image" in live_makefile
+    assert "live-test: toolbox-image live-target-image" in live_makefile
     assert "host-tests: runtime-venv" not in live_makefile
     assert "live-test: runtime-venv" not in live_makefile
 

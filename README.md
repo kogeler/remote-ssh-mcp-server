@@ -62,8 +62,8 @@ Ready-to-adapt client configurations are in [`doc/examples/`](doc/examples/).
 ## Tested End To End
 
 The full MCP surface is covered by unit and process-level integration tests and
-by automatic ephemeral-key and hardware-key runs against a disposable Debian
-container with real OpenSSH, rsync, NOPASSWD sudo, large transfers, and master
+by automatic ephemeral-key and hardware-key runs against isolated Podman
+topologies with real OpenSSH, rsync, NOPASSWD sudo, large transfers, and master
 loss.
 
 Released under the [MIT License](LICENSE).

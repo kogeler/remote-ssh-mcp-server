@@ -104,6 +104,8 @@ remote-ssh-mcp              Bash runtime validator and launcher
 remote-ssh-mcp.py           Python executable entry point
 remote_ssh_mcp/             implementation package
 tests/                      local and opt-in live tests
+tests/live_harness.py       thin Podman live-test CLI
+tests/live_support/         live topology, SSH material, cleanup, and orchestration
 doc/                        user and maintainer documentation
 requirements.txt            hashed runtime dependency lock
 requirements-dev.txt        hashed runtime and development lock

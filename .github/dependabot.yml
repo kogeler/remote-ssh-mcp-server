@@ -1,8 +1,7 @@
 version: 2
 updates:
-  # All lock files are pip-compile output. Dependabot recognises the header
-  # pip-compile writes, so it recompiles the whole tree from pyproject.toml
-  # instead of editing one pinned line, and its pull requests stay resolvable.
+  # The manifests own direct versions and pip-compile owns the generated locks.
+  # Group ordinary updates so one resolver change produces one coherent PR.
   - package-ecosystem: pip
     directory: /
     schedule:
@@ -11,6 +10,12 @@ updates:
       python-dependencies:
         patterns:
           - "*"
+    # Pydantic pins an exact pydantic-core build. Dependabot treats the
+    # transitive pip-compile lock entry as direct and otherwise repeatedly opens
+    # an uninstallable core-only update. Core moves through a pydantic update or
+    # an intentional `make refresh-dependencies`, never independently.
+    ignore:
+      - dependency-name: pydantic-core
 
   - package-ecosystem: github-actions
     directory: /

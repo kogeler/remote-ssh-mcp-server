@@ -128,9 +128,12 @@ under.
 
 ## Live Container Tests
 
-The live workflows build or reuse a Debian image and run a disposable container
-from it under rootless Podman. They remove the container and temporary secrets;
-content-addressed images remain cached until `make clean-containers`:
+The live workflows build or reuse pinned images and run disposable rootless
+Podman topologies. The automatic workflow uses separate server and SSH-target
+containers on an internal network with no published port; the FIDO workflow
+keeps the server on the host and publishes only a random loopback target port.
+They remove owned containers, networks, and temporary secrets; content-addressed
+images remain cached until `make clean-containers`:
 
 ```bash
 make runtime-venv
@@ -188,6 +191,10 @@ CI runs four jobs on every pull request against `main`:
 | `Dependency review` | blocks new dependencies with known vulnerabilities |
 | `CodeQL` | `security-extended` analysis, annotated on the diff |
 | `Live Podman` | the automatic ephemeral-key live run |
+
+Branch protection requires all four checks against the current `main` before a
+pull request can merge. Force pushes, branch deletion, and unresolved review
+conversations are also blocked.
 
 Two of them report into the pull request itself: the quality job posts a
 coverage comment, and Dependency Review posts a summary of dependency changes.

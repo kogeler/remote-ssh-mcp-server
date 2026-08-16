@@ -36,6 +36,7 @@ CONTAINER = required_environment("REMOTE_SSH_MCP_E2E_CONTAINER")
 TARGET = required_environment("REMOTE_SSH_MCP_E2E_TARGET")
 LOCAL_ROOT = Path(required_environment("REMOTE_SSH_MCP_E2E_LOCAL_ROOT"))
 LAUNCHER = Path(__file__).resolve().parents[1] / "remote-ssh-mcp"
+PODMAN = os.environ.get("PODMAN", "podman")
 
 # The server under test runs either on this host, next to a hardware key, or in
 # a second container on a private network with the target. SERVER_CONTAINER
@@ -53,7 +54,7 @@ def evidence(message: str) -> None:
 def run_target(*arguments: str, input_data: bytes | None = None) -> bytes:
     """Run an administrative command inside the disposable target container."""
     completed = subprocess.run(
-        ["podman", "exec", CONTAINER, *arguments],
+        [PODMAN, "exec", CONTAINER, *arguments],
         input=input_data,
         capture_output=True,
         check=False,
@@ -68,7 +69,7 @@ def run_target(*arguments: str, input_data: bytes | None = None) -> bytes:
 def target_log() -> str:
     """Return the container log, which is the only sshd authentication record."""
     completed = subprocess.run(
-        ["podman", "logs", CONTAINER],
+        [PODMAN, "logs", CONTAINER],
         capture_output=True,
         check=False,
     )
@@ -85,7 +86,25 @@ def target_interface() -> str:
     Rootless Podman names it after the host template interface rather than
     always using eth0, so it has to be discovered.
     """
-    route = run_target("ip", "route", "show", "default").decode()
+    if SERVER_CONTAINER:
+        inspected = subprocess.run(
+            [
+                PODMAN,
+                "inspect",
+                "--format",
+                "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+                SERVER_CONTAINER,
+            ],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        assert inspected.returncode == 0
+        server_address = inspected.stdout.strip()
+        assert server_address
+        route = run_target("ip", "route", "get", server_address).decode()
+    else:
+        route = run_target("ip", "route", "show", "default").decode()
     fields = route.split()
     if "dev" not in fields:
         raise AssertionError("the target has no default route")
@@ -96,7 +115,7 @@ def local_run(*arguments: str, input_data: bytes | None = None) -> bytes:
     """Run a command on whichever side owns the server's local root."""
     command = list(arguments)
     if SERVER_CONTAINER:
-        command = ["podman", "exec", "--interactive", SERVER_CONTAINER, *arguments]
+        command = [PODMAN, "exec", "--interactive", SERVER_CONTAINER, *arguments]
     completed = subprocess.run(
         command,
         input=input_data,
@@ -121,6 +140,20 @@ def local_read(path: Path) -> bytes:
     if SERVER_CONTAINER:
         return local_run("cat", str(path))
     return path.read_bytes()
+
+
+def local_write(path: Path, content: bytes) -> None:
+    if SERVER_CONTAINER:
+        local_run(
+            "sh",
+            "-c",
+            'umask 077; cat > "$1"',
+            "remote-ssh-mcp-write",
+            str(path),
+            input_data=content,
+        )
+        return
+    path.write_bytes(content)
 
 
 def local_symlink(path: Path, destination: str) -> None:
@@ -152,10 +185,13 @@ def provide_upload_source(path: Path, marker: bytes, size: int) -> str:
     with tempfile.TemporaryDirectory() as staging:
         staged = Path(staging) / path.name
         digest = write_large_local_file(staged, marker, size)
-        subprocess.run(
-            ["podman", "cp", str(staged), f"{SERVER_CONTAINER}:{path}"],
-            check=True,
-            capture_output=True,
+        local_run(
+            "sh",
+            "-c",
+            'umask 077; cat > "$1"',
+            "remote-ssh-mcp-upload",
+            str(path),
+            input_data=staged.read_bytes(),
         )
     return digest
 
@@ -210,7 +246,7 @@ def set_download_rate_limit(enabled: bool) -> None:
         )
         return
     completed = subprocess.run(
-        ["podman", "exec", CONTAINER, "tc", "qdisc", "del", "dev", interface, "root"],
+        [PODMAN, "exec", CONTAINER, "tc", "qdisc", "del", "dev", interface, "root"],
         capture_output=True,
         check=False,
     )
@@ -553,7 +589,7 @@ async def exercise_transfers(session: ClientSession, marker: bytes) -> None:
     assert refused["state"] == "failed"
     assert refused["error"]["code"] == "remote_path_exists"
 
-    upload_source.write_bytes(b"explicit-overwrite")
+    local_write(upload_source, b"explicit-overwrite")
     overwrite_hash = hashlib.sha256(b"explicit-overwrite").hexdigest()
     overwrite_id, _ = await start_transfer(
         session,
@@ -588,7 +624,7 @@ async def exercise_transfers(session: ClientSession, marker: bytes) -> None:
     )
     replaced = await wait_transfer(session, replace_id)
     assert replaced["state"] == "completed"
-    assert local_download.read_bytes() == b"normal-data"
+    assert local_read(local_download) == b"normal-data"
 
     missing_id, _ = await start_transfer(
         session,
@@ -758,12 +794,21 @@ async def prove_explicit_disconnect(
     )
     status = await call_ok(session, "connection_status", {})
     assert status["state"] == "disconnected"
-    try:
-        os.kill(master_pid, 0)
-    except ProcessLookupError:
-        pass
+    if SERVER_CONTAINER:
+        survived = await asyncio.to_thread(
+            subprocess.run,
+            [PODMAN, "exec", SERVER_CONTAINER, "/bin/kill", "-0", str(master_pid)],
+            capture_output=True,
+            check=False,
+        )
+        assert survived.returncode != 0, "SSH master process survived disconnect"
     else:
-        raise AssertionError("SSH master process survived disconnect")
+        try:
+            os.kill(master_pid, 0)
+        except ProcessLookupError:
+            pass
+        else:
+            raise AssertionError("SSH master process survived disconnect")
     await asyncio.sleep(1)
     logs = target_log()
     accepted_after = logs.count("Accepted publickey for mcp-test")
@@ -794,12 +839,18 @@ def server_parameters(environment: dict[str, str]) -> StdioServerParameters:
         "INFO",
     ]
     if SERVER_CONTAINER:
-        # The container was created with the entry point and options already
-        # set, so starting it is the whole command and its stdio is the
-        # protocol stream.
         return StdioServerParameters(
-            command="podman",
-            args=["start", "--attach", "--interactive", SERVER_CONTAINER],
+            command=PODMAN,
+            args=[
+                "exec",
+                "--interactive",
+                "--workdir",
+                str(LOCAL_ROOT),
+                SERVER_CONTAINER,
+                "/usr/local/bin/python",
+                "/work/src/remote-ssh-mcp.py",
+                *options,
+            ],
             env=environment,
         )
     return StdioServerParameters(

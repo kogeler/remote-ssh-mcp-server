@@ -66,8 +66,9 @@ README.
 - `remote_ssh_mcp/mcp_models.py` contains strict protocol models.
 - `tests/` contains unit, fake-process STDIO integration, launcher, and opt-in
   live container coverage.
-- `tests/live-target.sh` is the live harness for both key modes: it provisions
-  and removes the disposable Podman target and proves its confinement.
+- `tests/live_harness.py` is the thin live CLI for both key modes.
+  `tests/live_support/` owns process supervision, keys, Podman topology,
+  connection material, orchestration, cleanup, and confinement proofs.
 - `tests/live_podman_e2e.py` drives the shared MCP test matrix.
 - `make/container.mk` owns container policy: images, confinement flags, and
   the content-addressed image cache.

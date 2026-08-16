@@ -45,25 +45,40 @@ jobs:
         id: images
         run: make image-key >> "$GITHUB_OUTPUT"
 
-      - name: Restore the container images
-        id: image-cache
+      - name: Restore the toolbox image
+        id: toolbox-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: .artifacts/*.tar
-          key: images-${{ runner.os }}-${{ steps.images.outputs.toolbox }}-${{ steps.images.outputs.target }}
+          path: .artifacts/images/toolbox.tar
+          key: podman-${{ runner.os }}-${{ runner.arch }}-toolbox-${{ steps.images.outputs.toolbox }}
 
-      - name: Load the cached images
-        if: steps.image-cache.outputs.cache-hit == 'true'
-        run: make image-load
+      - name: Restore the resolver image
+        id: resolver-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .artifacts/images/resolver.tar
+          key: podman-${{ runner.os }}-${{ runner.arch }}-resolver-${{ steps.images.outputs.resolver }}
+
+      - name: Load the cached toolbox image
+        if: steps.toolbox-cache.outputs.cache-hit == 'true'
+        run: make image-load-toolbox
+
+      - name: Load the cached resolver image
+        if: steps.resolver-cache.outputs.cache-hit == 'true'
+        run: make image-load-resolver
 
       - name: Run local CI matrix
         env:
           RUFF_OUTPUT_FORMAT: github
         run: make ci
 
-      - name: Save the container images
-        if: steps.image-cache.outputs.cache-hit != 'true'
-        run: make image-save
+      - name: Export the toolbox image for caching
+        if: steps.toolbox-cache.outputs.cache-hit != 'true'
+        run: make image-save-toolbox
+
+      - name: Export the resolver image for caching
+        if: steps.resolver-cache.outputs.cache-hit != 'true'
+        run: make image-save-resolver
 
       - name: Publish the coverage report
         if: ${{ !cancelled() }}
@@ -154,6 +169,32 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Resolve the image cache key
+        id: images
+        run: make image-key >> "$GITHUB_OUTPUT"
+
+      - name: Restore the toolbox image
+        id: toolbox-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .artifacts/images/toolbox.tar
+          key: podman-${{ runner.os }}-${{ runner.arch }}-toolbox-${{ steps.images.outputs.toolbox }}
+
+      - name: Restore the live-target image
+        id: target-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .artifacts/images/live-target.tar
+          key: podman-${{ runner.os }}-${{ runner.arch }}-target-${{ steps.images.outputs.target }}
+
+      - name: Load the cached toolbox image
+        if: steps.toolbox-cache.outputs.cache-hit == 'true'
+        run: make image-load-toolbox
+
+      - name: Load the cached live-target image
+        if: steps.target-cache.outputs.cache-hit == 'true'
+        run: make image-load-target
+
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -185,3 +226,11 @@ jobs:
 
       - name: Run automatic live test
         run: make live-test
+
+      - name: Export the toolbox image for caching
+        if: steps.toolbox-cache.outputs.cache-hit != 'true'
+        run: make image-save-toolbox
+
+      - name: Export the live-target image for caching
+        if: steps.target-cache.outputs.cache-hit != 'true'
+        run: make image-save-target

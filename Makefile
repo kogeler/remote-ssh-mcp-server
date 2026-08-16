@@ -28,7 +28,7 @@ COVERAGE_TOTAL := coverage-total.txt
 PR_COMMENT := .github/scripts/pr-comment.sh
 ANNOTATE := .github/scripts/annotate-diagnostics.sh
 # Every Bash file in the repository, so syntax and lint cover all of them.
-SHELL_FILES := $(LAUNCHER) tests/live-target.sh \
+SHELL_FILES := $(LAUNCHER) \
 	containers/toolbox/entrypoint.sh containers/live-target/entrypoint.sh \
 	$(PR_COMMENT) $(ANNOTATE)
 COVERAGE_DATA := .coverage
@@ -214,7 +214,9 @@ coverage-report:
 
 syntax: toolbox-image
 	$(BOX_RUN) sh -ceu 'python -m compileall -q remote_ssh_mcp \
-		remote-ssh-mcp.py tests/live_podman_e2e.py; bash -n $(SHELL_FILES)'
+		remote-ssh-mcp.py tests/live_harness.py tests/live_support \
+		tests/live_podman_e2e.py; \
+		bash -n $(SHELL_FILES)'
 
 # The toolbox carries ShellCheck, so this can no longer be skipped silently.
 shellcheck: toolbox-image

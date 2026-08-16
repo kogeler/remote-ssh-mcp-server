@@ -98,9 +98,12 @@ passes:
 - the live job verifies that the runner has rootless Podman and executes the
   automatic ephemeral-key `make live-test` after the quality job succeeds.
 
-The quality job restores or saves toolbox and live-target OCI archives through
-`actions/cache`. The live job currently runs on a separate runner, does not
-restore that archive, and builds or reuses its target image locally.
+Three independent OCI archives are cached by their content-derived image keys
+and runner architecture. The quality job restores the toolbox and resolver; the
+live job restores the same toolbox and the live target. A cache miss builds and
+exports only the missing image, so a change to one image neither invalidates nor
+transfers either of the others. Every load verifies that the archive restored
+the exact expected tag.
 
 Two of those jobs also report into the pull request itself:
 
@@ -221,15 +224,16 @@ checks retain the tighter toolbox limits.
 
 ### Automated Updates
 
-Dependabot recognises `pip-compile` output by the header the tool writes, and
-recompiles the whole tree rather than editing one pinned line. That distinction
-matters: a single edited line in a resolved tree is usually unsatisfiable.
-`pydantic` requires an exact `pydantic-core`, and `pydantic-core` publishes
-releases ahead of the stable `pydantic` that consumes them, so a lone bump of
-that transitive package fails in pip before any check can run.
+Dependabot uses the `pip-compile` header to understand how the lock was produced,
+but it can still classify a transitive lock entry as a direct dependency and
+edit only that pin. `pydantic` requires an exact `pydantic-core`, while core
+releases can precede the stable Pydantic release that consumes them, so a lone
+core bump is unsatisfiable. `.github/dependabot.yml` therefore ignores only
+independent `pydantic-core` updates. Core still moves with an intentional
+Pydantic update or `make refresh-dependencies`.
 
 Never remove the header, and never add `--no-header` to the compile flags. It is
-the only thing that tells Dependabot how the file was produced.
+the only metadata that tells Dependabot how the file was produced.
 
 The runtime and development locks keep the complete transitive tree in files
 GitHub parses into the dependency graph. The graph is what gives Dependabot
@@ -245,13 +249,15 @@ schema/configuration tests. Keep `README.md` concise; details belong here.
 
 ## Live Container Tests
 
-Both live workflows build or reuse the content-addressed target image, run the
-server and matrix driver on the host, and connect them to one disposable target
-container through a random port bound only to `127.0.0.1`. They remove the
-container and every temporary file on success, failure, or interruption. Images
-are retained as a build cache and can be removed with `make clean-containers`.
-The workflows need rootless Podman and no host privilege: no daemon, bridge, or
-`sudo`.
+Both live workflows build or reuse the content-addressed target image and keep
+the matrix driver on the host. The automatic workflow runs the MCP server and
+SSH target in separate containers on a private internal Podman network and
+publishes no target port. The FIDO workflow runs the server on the host, where
+OpenSSH can reach the hardware key, and publishes the target's SSH port on a
+random `127.0.0.1` port. They remove every owned container, private network, and
+temporary file on success, failure, or interruption. Images are retained as a
+build cache and can be removed with `make clean-containers`. The workflows need
+rootless Podman and no host privilege: no daemon or `sudo`.
 
 The automatic workflow creates an unencrypted Ed25519 key in a mode-`0700`
 temporary directory, installs only its public half in the target, and deletes
@@ -312,14 +318,16 @@ the declared configuration proves nothing. The harness reads `CapEff` from
 `/proc` inside the running container and fails if a forbidden capability is
 present or a required one is missing.
 
-The SSH port is published on `127.0.0.1` with a random port. Any local user can
-reach that port while either test runs; authentication is public-key only, with
-a newly generated ephemeral key in the automatic mode.
+The automatic target publishes no port. Only its confined server peer can reach
+port 22 through the per-run internal network. In FIDO mode the target is instead
+published on a random `127.0.0.1` port because the server and hardware-key-aware
+OpenSSH client run on the host. Any local user can reach that loopback port
+while the FIDO test runs; authentication remains public-key only.
 
 The matrix covers disconnected startup, strict schemas, commands, timeouts,
 bounded and binary output, inspection, unusual filenames, NOPASSWD sudo,
 password/cache refusal, policy denial, large upload/download, overwrite,
 cancellation, resume, hashes, concurrency, one authentication, one transport,
-master loss, and explicit disconnect. Cleanup removes the container and every
-temporary authentication, host-key, runtime, and transfer artifact on success
-or failure.
+master loss, and explicit disconnect. Cleanup removes the owned containers and
+network plus every temporary authentication, host-key, runtime, and transfer
+artifact on success or failure.
