@@ -1,0 +1,80 @@
+# Container images for project-aware checks and dependency resolution.
+#
+# Project source is not baked in. The work tree is streamed in as a tar on stdin
+# at run time; only the pinned development lock affects the check stage, so the
+# image can be cached by content.
+#
+# The base image is pinned by digest so a run is reproducible and Dependabot can
+# propose the update explicitly. Never replace the digest with a tag.
+FROM docker.io/library/python:3.13-slim@sha256:8fef26df932191825664e4957ff488c96dfe64918327634a357a55facbc994d3 AS base
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_ROOT_USER_ACTION=ignore \
+    PYTHONDONTWRITEBYTECODE=1
+
+# The unprivileged account every check runs as. Combined with --userns=auto on
+# the host it maps to a subordinate id that owns nothing outside the container.
+RUN useradd --create-home --uid 1000 --shell /bin/bash box
+
+# The resolver stage exists only to regenerate and verify locks. Keeping it
+# separate breaks the circular dependency where a damaged development lock
+# would have to build successfully before it could be repaired.
+FROM base AS lock
+
+# This is the one bootstrap environment that cannot be installed from a lock it
+# generates itself. Pin its complete wheel-only tree explicitly so rebuilding a
+# content-addressed tag at a later date cannot select different resolver code.
+RUN python -m pip install --quiet --only-binary=:all: \
+        pip==26.2.1 \
+        setuptools==84.0.0 \
+        pip-tools==7.6.1 \
+        build==1.5.0 \
+        click==8.4.2 \
+        packaging==26.3 \
+        pyproject-hooks==1.2.0 \
+        wheel==0.48.0
+
+COPY containers/toolbox/entrypoint.sh /usr/local/sbin/toolbox-entrypoint
+RUN chmod 0755 /usr/local/sbin/toolbox-entrypoint
+
+USER box
+WORKDIR /work
+ENTRYPOINT ["/usr/local/sbin/toolbox-entrypoint"]
+
+# The check stage installs the hashed development lock, so every package it
+# carries is verified against a recorded digest before it is unpacked.
+FROM base AS dev
+
+# openssh-client and rsync are not used to reach anything: the process fakes in
+# tests/ assert the argument vectors the server builds, and resolving those
+# programs is part of what they assert.
+#
+# procps provides /bin/kill, which the runtime uses by absolute path to signal a
+# whole process group. Without it every timeout and cancellation silently fails
+# to terminate anything: the child keeps running and the caller reports a
+# timeout it cannot explain.
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install --yes \
+        --no-install-recommends \
+        openssh-client \
+        procps \
+        tini \
+        rsync \
+        shellcheck \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-dev.txt /tmp/requirements-dev.txt
+RUN python -m pip install --quiet --require-hashes \
+        --requirement /tmp/requirements-dev.txt \
+    && rm -f /tmp/requirements-dev.txt
+
+COPY containers/toolbox/entrypoint.sh /usr/local/sbin/toolbox-entrypoint
+RUN chmod 0755 /usr/local/sbin/toolbox-entrypoint
+
+USER box
+WORKDIR /work
+# tini reaps reparented children. Without an init the command itself would be
+# PID 1, and the tests that prove signal handling and child reaping would
+# observe semantics no real deployment has.
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/sbin/toolbox-entrypoint"]

@@ -16,16 +16,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The full analysis and test environment. It is installed in the toolbox for
+# normal checks and on the host only for the explicitly selected host tests.
 dev = [
     "bandit[toml]==1.9.4",
     "mypy==2.3.1",
+    # Imported directly by the repository-layout tests, so both are declared as
+    # direct test dependencies rather than relying on a transitive tool tree.
+    "packaging==26.3",
     "pip-audit==2.10.1",
-    "pip-tools==7.6.1",
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
     "pytest-cov==7.1.0",
     "pytest-xdist==3.8.0",
-    "ruff==0.16.3",
+    "pyyaml==6.0.3",
 ]
 
 [project.scripts]
@@ -40,7 +44,7 @@ python_version = "3.11"
 strict = true
 
 [tool.bandit]
-exclude_dirs = ["tests", "venv"]
+exclude_dirs = ["tests", "venv", "venv-runtime", "venv-lint"]
 # Runtime asserts narrow types after validated lifecycle and schema checks.
 skips = ["B101"]
 
@@ -49,7 +53,7 @@ branch = true
 source = ["remote_ssh_mcp"]
 
 [tool.coverage.report]
-# Measured total is about 76.9%, with occasional jitter from timing-sensitive
+# Measured total is about 77.1%, with occasional jitter from timing-sensitive
 # branches. The gate keeps a small margin for that and for refactors while
 # still failing on a real regression.
 fail_under = 75

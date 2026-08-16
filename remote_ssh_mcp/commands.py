@@ -31,6 +31,8 @@ runtime_dir=
 payload_pipe=
 child_pid=
 watcher_pid=
+startup_critical=0
+interruption_pending=0
 terminate_child() {{
     if test -z "$child_pid"; then
         return
@@ -55,6 +57,10 @@ cleanup() {{
     fi
 }}
 interrupted() {{
+    if test "$startup_critical" = 1; then
+        interruption_pending=1
+        return
+    fi
     terminate_child
     exit 255
 }}
@@ -64,13 +70,44 @@ IFS= read -r payload_size || exit 70
 case "$payload_size" in
     ''|*[!0-9]*) exit 71 ;;
 esac
-runtime_dir=$(mktemp -d "${{TMPDIR:-/tmp}}/remote-ssh-mcp.XXXXXXXX") || exit 72
+# Create the directory outside the supervisor's process group. The supervisor
+# records cancellation during this short critical section, then either adopts
+# the successfully created directory or exits without touching an existing path.
+runtime_candidate=${{TMPDIR:-/tmp}}/remote-ssh-mcp.$$
+startup_critical=1
+if setsid mkdir -m 700 -- "$runtime_candidate"; then
+    runtime_dir=$runtime_candidate
+    runtime_status=0
+else
+    runtime_status=$?
+fi
+startup_critical=0
+if test "$interruption_pending" = 1; then
+    exit 255
+fi
+if test "$runtime_status" -ne 0; then
+    exit 72
+fi
 payload_pipe=$runtime_dir/payload
 mkfifo -m 600 "$payload_pipe" || exit 73
 exec 3<&0
-setsid {remote_program} < "$payload_pipe" &
+# A temporary read-write guard lets the supervisor open separate read-only and
+# write-only ends without blocking. The child inherits only the read end, so it
+# still receives EOF as soon as the payload writer closes.
+exec 4<> "$payload_pipe" || exit 73
+exec 5< "$payload_pipe" || exit 73
+exec 6> "$payload_pipe" || exit 73
+exec 4>&-
+startup_critical=1
+setsid {remote_program} <&5 5<&- 6>&- &
 child_pid=$!
-dd iflag=fullblock bs=1 count="$payload_size" of="$payload_pipe" status=none || exit 74
+startup_critical=0
+if test "$interruption_pending" = 1; then
+    exit 255
+fi
+exec 5<&-
+dd iflag=fullblock bs=1 count="$payload_size" status=none >&6 || exit 74
+exec 6>&-
 setsid /bin/sh -c '
     child_pid=$1
     payload_pipe=$2

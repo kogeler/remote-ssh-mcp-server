@@ -32,29 +32,38 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Python
+      # Ruff is the only host tool. Pin Python for its isolated venv; every
+      # check that needs the project environment still runs in the toolbox.
+      - name: Set up Python for Ruff
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
           cache: pip
-          cache-dependency-path: |
-            requirements.txt
-            requirements-dev.txt
+          cache-dependency-path: requirements-lint.txt
 
-      - name: Install system checks
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes shellcheck
+      - name: Resolve the image cache key
+        id: images
+        run: make image-key >> "$GITHUB_OUTPUT"
 
-      - name: Bootstrap pinned dependencies
-        run: make venv
+      - name: Restore the container images
+        id: image-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .artifacts/*.tar
+          key: images-${{ runner.os }}-${{ steps.images.outputs.toolbox }}-${{ steps.images.outputs.target }}
 
-      # GITHUB_ACTIONS is already set for the mypy annotation filter; Ruff needs
-      # its own renderer selected explicitly.
+      - name: Load the cached images
+        if: steps.image-cache.outputs.cache-hit == 'true'
+        run: make image-load
+
       - name: Run local CI matrix
         env:
           RUFF_OUTPUT_FORMAT: github
         run: make ci
+
+      - name: Save the container images
+        if: steps.image-cache.outputs.cache-hit != 'true'
+        run: make image-save
 
       - name: Publish the coverage report
         if: ${{ !cancelled() }}
@@ -62,7 +71,7 @@ jobs:
           REPORT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -o pipefail
-          if [[ ! -f .coverage ]]; then
+          if [[ ! -f .artifacts/coverage-total.txt ]]; then
             printf '%s\n' 'Coverage data was not produced by this run.' \
               >> "$GITHUB_STEP_SUMMARY"
             exit 0
@@ -71,7 +80,7 @@ jobs:
             make coverage-report
             printf '\n<sub>Commit %s · reproduce with: make test && make coverage-report</sub>\n' \
               "${REPORT_SHA:0:7}"
-          } | tee coverage-report.md >> "$GITHUB_STEP_SUMMARY"
+          } | tee .artifacts/pr-coverage.md >> "$GITHUB_STEP_SUMMARY"
 
       # Fork pull requests receive a read-only token whatever this job requests,
       # so a rejected comment must never mask the real quality-gate result.
@@ -82,8 +91,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          if [[ -f coverage-report.md ]]; then
-            .github/scripts/pr-comment.sh coverage coverage-report.md
+          if [[ -f .artifacts/pr-coverage.md ]]; then
+            .github/scripts/pr-comment.sh coverage .artifacts/pr-coverage.md
           fi
 
   dependency-review:
@@ -134,8 +143,8 @@ jobs:
         with:
           category: /language:python
 
-  live-lxc:
-    name: Live LXC
+  live-podman:
+    name: Live Podman
     needs: quality
     runs-on: ubuntu-26.04
     timeout-minutes: 30
@@ -152,41 +161,27 @@ jobs:
           cache: pip
           cache-dependency-path: |
             requirements.txt
-            requirements-dev.txt
 
       - name: Install test host dependencies
         run: |
           sudo apt-get update
           sudo apt-get install --yes rsync
-          if ! snap list lxd >/dev/null 2>&1; then
-            sudo snap install lxd
-          fi
-          sudo /snap/bin/lxd waitready
-          if ! sudo /snap/bin/lxc storage show default >/dev/null 2>&1; then
-            sudo /snap/bin/lxd init --minimal
-          fi
-          sudo usermod --append --groups lxd "$USER"
 
-      # The runner image ships a running Docker daemon, which sets the FORWARD
-      # policy to DROP. Bridged LXD traffic is forwarded, so without this the
-      # test instance still resolves names through the bridge but cannot reach
-      # any archive, and provisioning fails on apt.
-      - name: Allow LXD bridge traffic through the host firewall
+      # Rootless is what makes the target's root harmless on the host, so the
+      # job refuses to continue without it rather than silently testing a
+      # weaker isolation than the one this repository documents.
+      - name: Verify rootless Podman
         run: |
-          if ! ip link show lxdbr0 >/dev/null 2>&1; then
-            printf '%s\n' 'lxdbr0 is missing; LXD did not create its bridge.' >&2
+          podman version
+          rootless="$(podman info --format '{{.Host.Security.Rootless}}')"
+          printf 'rootless=%s\n' "$rootless"
+          if [[ "$rootless" != true ]]; then
+            printf '%s\n' 'rootless Podman is required for the live test' >&2
             exit 1
           fi
-          if sudo iptables --numeric --list DOCKER-USER >/dev/null 2>&1; then
-            sudo iptables --insert DOCKER-USER --in-interface lxdbr0 --jump ACCEPT
-            sudo iptables --insert DOCKER-USER --out-interface lxdbr0 \
-              --match conntrack --ctstate RELATED,ESTABLISHED --jump ACCEPT
-          fi
-          sudo iptables --policy FORWARD ACCEPT
-          sudo iptables --list-rules FORWARD
 
-      - name: Bootstrap pinned dependencies
-        run: make venv
+      - name: Install runtime dependencies explicitly
+        run: make runtime-venv
 
       - name: Run automatic live test
-        run: sg lxd -c "PATH=/snap/bin:$PATH make live-test"
+        run: make live-test

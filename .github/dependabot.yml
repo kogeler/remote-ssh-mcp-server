@@ -1,6 +1,6 @@
 version: 2
 updates:
-  # Both lock files are pip-compile output. Dependabot recognises the header
+  # All lock files are pip-compile output. Dependabot recognises the header
   # pip-compile writes, so it recompiles the whole tree from pyproject.toml
   # instead of editing one pinned line, and its pull requests stay resolvable.
   - package-ecosystem: pip

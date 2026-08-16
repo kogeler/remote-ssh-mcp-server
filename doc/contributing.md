@@ -28,20 +28,22 @@ discussion.
 
 ## Environment
 
-You need Python 3.11 or newer, OpenSSH, and rsync. ShellCheck is optional
-locally and always runs in CI. Everything else is installed into a
-repository-local `venv/` that Git ignores:
+You need Python 3.11 or newer, rootless Podman, Git, tar, OpenSSH, and rsync.
+Make bootstraps the Ruff-only host venv and runs every project-aware check in a
+container:
 
 ```bash
 git clone git@github.com:kogeler/remote-ssh-mcp-server.git
 cd remote-ssh-mcp-server
-make venv
+make check
 ```
 
-`make venv` runs the launcher, which creates the virtual environment and
-installs the hashed runtime lock, then adds the development lock on top. Never
-install project dependencies into a system or user environment, and never
-activate an unrelated virtual environment for this repository.
+`make runtime-venv` is the explicit installation step for actually running the
+server on this host. It creates persistent `venv-runtime/` from the runtime lock
+only; no development tool is installed there. `make host-tests` creates its
+development venv below `${TMPDIR:-/tmp}` and removes it on exit. Never install
+project dependencies into a system or user environment, and never activate an
+unrelated virtual environment here.
 
 `make help` lists every supported target. Make is the supported interface;
 prefer it over calling the tools directly so local runs match CI.
@@ -55,7 +57,7 @@ make check
 
 `make format` applies Ruff fixes and formatting. `make check` runs Ruff lint and
 format validation, strict mypy, Bandit, the pytest suite with its coverage gate,
-Python compilation, Bash syntax, ShellCheck when installed, and an exact
+Python compilation, Bash syntax, ShellCheck, and an exact
 dependency-freeze comparison. `make ci` adds the online `pip-audit` scan and is
 what the CI quality job executes.
 
@@ -88,6 +90,12 @@ Every behavior change needs a test that would fail without it.
 - Keep tests parallel-safe. The suite runs under `pytest-xdist` with
   `-n auto --dist=worksteal`, so tests must not depend on order, shared
   temporary paths, or a fixed port.
+- Do not add a test that needs Podman on the machine, or a real launcher
+  subprocess, to the ordinary suite. Mark it `@pytest.mark.host`: the ordinary
+  suite runs inside a container, where neither exists. `make host-tests` and
+  `make live-fido-test` run the marked set.
+- A test must leave nothing in the checkout. If it exercises something that
+  writes beside the sources, copy the sources to a temporary directory first.
 - Coverage is measured on every run and the build fails below the threshold in
   `[tool.coverage.report].fail_under`. That value lives in `pyproject.toml`
   only. Raise it when the suite genuinely improves; never lower it to make a
@@ -96,18 +104,43 @@ Every behavior change needs a test that would fail without it.
 `make coverage-report` prints the Markdown report for the last run, which is
 the same report CI publishes on the pull request.
 
-## Live LXC Tests
+## Debugging A Silent Failure
 
-The live workflows create and delete a real Debian LXC instance and change the
-local LXC daemon. Run them only on a host you are authorized to use for
-disposable containers:
+Some failures explain nothing by themselves: a command returns the right output
+and never finishes, a timeout fires with no diagnostic, a process vanishes
+without a message. Reach for a tracer at once rather than narrowing by trial.
+
+Rebuilding the failing path as a smaller reproduction is the tempting move and
+usually the wrong one: a reproduction that leaves out the broken step proves
+only that the rest works. Varying the environment one flag at a time is worse,
+because every variation costs a full run and answers a question you did not
+choose deliberately.
 
 ```bash
+strace -f -e trace=execve,wait4,exit_group,kill -o trace.log <command>
+```
+
+Read it for `exit_group(127)`, which means a program was not found, and for
+`ENOENT` on an `execve`, which names the missing program. Inside a container the
+tracer needs `--cap-add=SYS_PTRACE`, `--security-opt seccomp=unconfined`, and
+root; use a throwaway container for it, never the confinement the checks run
+under.
+
+## Live Container Tests
+
+The live workflows build or reuse a Debian image and run a disposable container
+from it under rootless Podman. They remove the container and temporary secrets;
+content-addressed images remain cached until `make clean-containers`:
+
+```bash
+make runtime-venv
 make live-preflight
 make live-test
 ```
 
-`make live-test` is unattended and generates its own ephemeral Ed25519 key.
+The runtime installation is an explicit prerequisite; neither live target
+creates it. `make live-test` is unattended and generates its own ephemeral
+Ed25519 key.
 `make live-fido-test` uses an existing hardware-backed key and pauses for a PIN
 and touch. Pass hardware-key paths as runtime parameters only. Never commit a
 key path, key material, or a real hostname to source, documentation, fixtures,
@@ -116,21 +149,23 @@ contract.
 
 ## Dependencies
 
-`pyproject.toml` is the only file you edit by hand, and only its direct pinned
-versions. `requirements.txt` and `requirements-dev.txt` are `pip-compile`
-output:
+Edit direct pinned versions only in the owning manifest: runtime and toolbox
+dependencies live in root `pyproject.toml`, while Ruff lives in
+`tools/lint/pyproject.toml`. The three `requirements*.txt` files are generated
+`pip-compile` output:
 
 ```bash
 make lock
 make check
 ```
 
-Never hand-edit a lock; `make check` recompiles both and fails on any drift.
+Never hand-edit a lock; `make check` recompiles all three and fails on any drift.
 Runtime dependencies belong in `[project].dependencies` and reach every
-installed server, so weigh them accordingly; tooling belongs in the `dev` extra
-and never leaves a development environment. Justify every new direct
-dependency in the pull request. A dependency that a few lines of standard
-library code replace will be questioned.
+installed server, so weigh them accordingly; toolbox tooling belongs in the
+`dev` extra and Ruff belongs in its separate lint manifest.
+Tooling never reaches an installed server. Justify every new direct dependency
+in the pull request. A dependency that a few lines of standard-library code
+replace will be questioned.
 
 ## Documentation
 
@@ -152,7 +187,7 @@ CI runs four jobs on every pull request against `main`:
 | `Lint, test, and audit` | `make ci`, plus the coverage report |
 | `Dependency review` | blocks new dependencies with known vulnerabilities |
 | `CodeQL` | `security-extended` analysis, annotated on the diff |
-| `Live LXC` | the automatic ephemeral-key live run |
+| `Live Podman` | the automatic ephemeral-key live run |
 
 Two of them report into the pull request itself: the quality job posts a
 coverage comment, and Dependency Review posts a summary of dependency changes.

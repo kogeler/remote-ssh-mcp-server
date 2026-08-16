@@ -7,11 +7,14 @@ repository. Read the relevant documentation below before editing behavior.
 
 - `README.md` is the concise public-facing repository overview.
 - `LICENSE` contains the MIT terms for the repository.
-- `pyproject.toml` is the source of direct runtime and development dependencies.
-- `requirements.txt` and `requirements-dev.txt` are generated `pip-compile`
-  locks with hashes. The launcher installs the runtime one; `make venv` adds the
-  development one. Never hand-edit either, and never drop the pip-compile
-  header.
+- `pyproject.toml` is the source of direct runtime and toolbox/host-test
+  dependencies. `tools/lint/pyproject.toml` separately owns the Ruff-only host
+  environment.
+- `requirements.txt`, `requirements-dev.txt`, and `requirements-lint.txt` are
+  generated `pip-compile` locks with hashes. `make runtime-venv` explicitly
+  installs the runtime one; the toolbox and ephemeral host-test venv install
+  the development one; the host lint venv installs the lint one. Never
+  hand-edit a lock or drop its pip-compile header.
 - `doc/getting-started.md` covers installation, Codex and Claude Code setup,
   connection modes, options, and troubleshooting.
 - `doc/tools.md` defines the MCP tools, command and transfer behavior, and
@@ -21,14 +24,14 @@ repository. Read the relevant documentation below before editing behavior.
 - `doc/architecture.md` explains processes, lifecycle, data paths, components,
   design decisions, repository layout, and future scope.
 - `doc/development.md` defines local checks, dependency updates, and the
-  automatic and FIDO-assisted live LXC workflows.
+  automatic and FIDO-assisted live container workflows.
 - `doc/contributing.md` is the human contributor guide: environment setup, the
   change loop, review expectations, and pull request requirements. Follow it
   when preparing a change on someone's behalf.
 - `doc/examples/` contains complete Codex and Claude Code client examples.
 - `Makefile` is the supported development and validation interface.
 - `.github/workflows/ci.yml` is the SHA-pinned pull-request and `main` CI,
-  including CodeQL, the automatic live LXC job, and the pull-request coverage
+  including CodeQL, the automatic live Podman job, and the pull-request coverage
   and dependency reports.
 - `.github/scripts/pr-comment.sh` publishes one sticky pull-request comment per
   report marker.
@@ -43,7 +46,8 @@ README.
 
 ## Code Map
 
-- `remote-ssh-mcp` is the standalone PATH launcher and venv bootstrapper.
+- `remote-ssh-mcp` validates the explicitly installed runtime venv and starts
+  the Python entry point. It must never create an environment or invoke pip.
 - `remote-ssh-mcp.py` is the Python executable entry point.
 - `remote_ssh_mcp/cli.py` parses immutable startup policy. SSH targets must not
   become startup arguments.
@@ -61,13 +65,16 @@ README.
   cancellation, and atomic publication.
 - `remote_ssh_mcp/mcp_models.py` contains strict protocol models.
 - `tests/` contains unit, fake-process STDIO integration, launcher, and opt-in
-  live LXC coverage.
-- `tests/run-live-lxc.sh` generates a temporary Ed25519 key and starts the
-  unattended live workflow.
-- `tests/run-live-fido-lxc.sh` accepts runtime hardware-key paths and starts the
-  operator-assisted live workflow.
-- `tests/run-live-lxc-core.sh` provisions and removes the common disposable
-  LXC target; `tests/live_lxc_e2e.py` drives the shared MCP test matrix.
+  live container coverage.
+- `tests/live-target.sh` is the live harness for both key modes: it provisions
+  and removes the disposable Podman target and proves its confinement.
+- `tests/live_podman_e2e.py` drives the shared MCP test matrix.
+- `make/container.mk` owns container policy: images, confinement flags, and
+  the content-addressed image cache.
+- `containers/` holds the toolbox/resolver stages, live-target image, and their
+  entry points.
+- `tools/lint/pyproject.toml` defines the only third-party tool allowed in the
+  host lint venv: the self-contained Ruff wheel.
 
 ## Required Invariants
 
@@ -99,30 +106,46 @@ README.
 ## Development Workflow
 
 ```bash
-make venv
 make format
 make check
 make ci
 ```
 
-After intentionally changing dependencies, update only direct versions in
-`pyproject.toml`, run `make lock`, and review both regenerated locks. Use
-`make refresh-dependencies` to move the whole tree to current versions instead.
-Never hand-edit a lock. Keep pytest parallel-safe because the default suite runs
-through pytest-xdist workers.
+Run `make runtime-venv` explicitly before using the MCP server from an agent
+configuration. Ordinary development checks do not depend on that environment.
+
+After intentionally changing dependencies, update only direct versions in the
+owning `pyproject.toml`, run `make lock`, and review all three regenerated
+locks. Use `make refresh-dependencies` to move the whole tree to current
+versions instead. Never hand-edit a lock. Keep pytest parallel-safe because the
+default suite runs through pytest-xdist workers.
 
 Every pytest run measures branch coverage and fails below
 `[tool.coverage.report].fail_under` in `pyproject.toml`, which is the only
 place that stores the threshold. Raise it when the suite improves; never lower
 it to make a red build green.
 
+When a failure's own output explains nothing - a command produces correct
+output yet never finishes, a timeout fires with no diagnostic, a process
+disappears without a message - go to a tracer immediately. Do not rebuild the
+failing path as a smaller reproduction and do not vary the environment by
+trial: a reproduction that omits the broken step proves nothing, and each
+variation costs a full run.
+
+`strace -f -e trace=execve,wait4,exit_group,kill` on the real process answers
+this class of question in one run. `exit_group(127)` means a program was not
+found; `ENOENT` on an `execve` names it. Inside a container a tracer needs
+`--cap-add=SYS_PTRACE`, `--security-opt seccomp=unconfined`, and root.
+
 Local tests must not use a real SSH identity. Keep process fakes strict enough
 to prove argument vectors, one-authentication behavior, cleanup, and no-fallback
 semantics.
 
-`make live-test` is unattended and uses a newly generated ephemeral key.
+Run `make runtime-venv` as a separate explicit prerequisite before either full
+live workflow; the live targets do not install it. `make live-test` is
+unattended and uses a newly generated ephemeral key.
 `make live-fido-test` may invoke a hardware-token PIN dialog and requires the
-operator checkpoint. Both create and delete an LXC instance, so run them only
-on an explicitly authorized LXC test host. Pass FIDO key paths at runtime;
+operator checkpoint. Both create and delete a container, so run them only on a
+host with rootless Podman available. Pass FIDO key paths at runtime;
 never embed them in source, documentation, fixtures, logs, or Git. See
 `doc/development.md` for the complete procedure and cleanup contract.

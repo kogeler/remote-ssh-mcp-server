@@ -5,8 +5,7 @@ set -euo pipefail
 entry_point_name='remote-ssh-mcp.py'
 
 repository_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-venv_dir="${repository_dir}/venv"
-activation_file="${venv_dir}/bin/activate"
+venv_dir="${repository_dir}/venv-runtime"
 venv_python="${venv_dir}/bin/python"
 requirements_file="${repository_dir}/requirements.txt"
 requirements_state="${venv_dir}/.requirements.txt"
@@ -22,29 +21,15 @@ if [[ ! -x "${entry_point}" ]]; then
     exit 1
 fi
 
-if [[ ! -x "${venv_python}" || ! -r "${activation_file}" ]]; then
-    if ! command -v python3 >/dev/null 2>&1; then
-        printf 'Python 3 is required to create the virtual environment.\n' >&2
-        exit 1
-    fi
-
-    printf 'Creating virtual environment: %s\n' "${venv_dir}" >&2
-    if ! python3 -m venv "${venv_dir}"; then
-        printf 'Failed to create virtual environment: %s\n' "${venv_dir}" >&2
-        exit 1
-    fi
+if [[ ! -x "${venv_python}" ]]; then
+    printf 'Runtime environment is not installed; run: make runtime-venv\n' >&2
+    exit 1
 fi
 
 if [[ ! -f "${requirements_state}" ]] ||
     ! cmp -s "${requirements_file}" "${requirements_state}"; then
-    printf 'Installing dependencies from: %s\n' "${requirements_file}" >&2
-    if ! "${venv_python}" -m pip install --requirement "${requirements_file}"; then
-        printf 'Dependency installation failed; it will be retried on the next run.\n' >&2
-        exit 1
-    fi
-    cp -- "${requirements_file}" "${requirements_state}"
+    printf 'Runtime environment is stale; run: make runtime-venv\n' >&2
+    exit 1
 fi
 
-# shellcheck disable=SC1090
-source "${activation_file}"
-exec "${entry_point}" "$@"
+exec "${venv_python}" "${entry_point}" "$@"

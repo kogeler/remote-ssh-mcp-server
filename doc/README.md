@@ -9,7 +9,7 @@
 - [Architecture](architecture.md): process model, lifecycle, components,
   transport invariants, data paths, and design decisions.
 - [Development](development.md): repository layout, virtual environment,
-  checks, dependency updates, and automatic or FIDO-assisted live LXC
+  checks, dependency updates, and automatic or FIDO-assisted live container
   validation.
 - [Contributing](contributing.md): environment setup, the local change loop,
   test and coverage expectations, dependency and documentation rules, and pull
