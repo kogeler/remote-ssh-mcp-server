@@ -2,22 +2,16 @@
 
 set -euo pipefail
 
-entry_point_name='remote-ssh-mcp.py'
-
 repository_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 venv_dir="${repository_dir}/venv-runtime"
 venv_python="${venv_dir}/bin/python"
 requirements_file="${repository_dir}/requirements.txt"
 requirements_state="${venv_dir}/.requirements.txt"
-entry_point="${repository_dir}/${entry_point_name}"
+version_file="${repository_dir}/.version"
+version_state="${venv_dir}/.version"
 
-if [[ ! -f "${requirements_file}" ]]; then
-    printf 'Requirements file is missing: %s\n' "${requirements_file}" >&2
-    exit 1
-fi
-
-if [[ ! -x "${entry_point}" ]]; then
-    printf 'Entry point is missing or not executable: %s\n' "${entry_point}" >&2
+if [[ ! -f "${requirements_file}" ]] || [[ ! -f "${version_file}" ]]; then
+    printf 'Project runtime metadata is missing\n' >&2
     exit 1
 fi
 
@@ -27,9 +21,19 @@ if [[ ! -x "${venv_python}" ]]; then
 fi
 
 if [[ ! -f "${requirements_state}" ]] ||
-    ! cmp -s "${requirements_file}" "${requirements_state}"; then
+    [[ ! -f "${version_state}" ]] ||
+    ! cmp -s "${requirements_file}" "${requirements_state}" ||
+    ! cmp -s "${version_file}" "${version_state}"; then
     printf 'Runtime environment is stale; run: make runtime-venv\n' >&2
     exit 1
 fi
 
-exec "${venv_python}" "${entry_point}" "$@"
+if ! "${venv_python}" -I -c \
+    'import importlib.metadata, pathlib, remote_ssh_mcp, ssh_wrapper, sys; expected = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").strip(); assert remote_ssh_mcp.__version__ == expected; assert importlib.metadata.version("remote-ssh-mcp") == expected; assert importlib.metadata.version("ssh-wrapper") == "0.1.0"' \
+    "${version_file}" \
+    >/dev/null 2>&1; then
+    printf 'Runtime environment is invalid; run: make runtime-venv\n' >&2
+    exit 1
+fi
+
+exec "${venv_python}" -I -m remote_ssh_mcp "$@"

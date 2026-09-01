@@ -34,7 +34,7 @@ class LocalShellMaster:
 def command_stack(
     runtime_config: RuntimeConfig,
 ) -> tuple[CommandRunner, RemoteInspector, LocalShellMaster, LocalPathPolicy]:
-    paths = LocalPathPolicy(runtime_config.local_root)
+    paths = LocalPathPolicy(runtime_config.repository_root)
     paths.initialize()
     master = LocalShellMaster()
     runner = CommandRunner(runtime_config, master, paths)  # type: ignore[arg-type]
@@ -58,7 +58,7 @@ async def test_command_separates_streams_and_exit_code(command_stack) -> None:
 async def test_signal_exit_is_preserved(command_stack) -> None:
     runner, _inspector, _master, _paths = command_stack
 
-    result = await runner.execute("kill -TERM $$")
+    result = await runner.execute("kill -TERM $$", timeout=10)
 
     assert result.exit_code == 128 + signal.SIGTERM
 
@@ -110,7 +110,7 @@ async def test_output_is_truncated_and_optionally_spooled(
     assert len(result.stdout.raw) == runner.config.max_output_bytes
     assert result.stdout.total_bytes == runner.config.max_output_bytes + 1000
     assert result.stdout.spool_path is not None
-    spool = paths.root / result.stdout.spool_path
+    spool = paths.repository / result.stdout.spool_path
     assert spool.stat().st_size == result.stdout.total_bytes
     assert spool.stat().st_mode & 0o777 == 0o600
 
@@ -239,6 +239,71 @@ async def test_payload_copy_failure_does_not_orphan_fifo_reader(
 
 
 @pytest.mark.asyncio
+async def test_watcher_is_armed_before_payload_releases_child(
+    command_stack, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner, _inspector, _master, _paths = command_stack
+    runtime = tmp_path / "remote-runtime"
+    runtime.mkdir()
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    real_dd = shutil.which("dd")
+    assert real_dd is not None
+    fake_dd = fake_bin / "dd"
+    fake_dd.write_text(
+        f"""#!/usr/bin/env python3
+import os
+import sys
+import time
+from pathlib import Path
+
+parent = os.getppid()
+deadline = time.monotonic() + 1
+while time.monotonic() < deadline:
+    descendants = {{parent}}
+    statuses = []
+    for status_path in Path("/proc").glob("[0-9]*/status"):
+        try:
+            fields = dict(
+                line.split(":", 1)
+                for line in status_path.read_text(encoding="ascii").splitlines()
+                if ":" in line
+            )
+        except OSError:
+            continue
+        statuses.append((int(fields["Pid"].strip()), int(fields["PPid"].strip())))
+    changed = True
+    while changed:
+        changed = False
+        for process_id, parent_id in statuses:
+            if parent_id in descendants and process_id not in descendants:
+                descendants.add(process_id)
+                changed = True
+    for process_id in descendants - {{parent}}:
+        try:
+            command = Path(f"/proc/{{process_id}}/cmdline").read_bytes()
+        except OSError:
+            continue
+        if b"remote-ssh-mcp-watcher" in command:
+            os.execv({real_dd!r}, [{real_dd!r}, *sys.argv[1:]])
+    time.sleep(0.01)
+raise SystemExit(75)
+""",
+        encoding="utf-8",
+    )
+    fake_dd.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+    monkeypatch.setenv("TMPDIR", str(runtime))
+
+    result = await runner.execute("printf ready")
+
+    assert result.exit_code == 0
+    assert not result.timed_out
+    assert result.stdout.raw == b"ready"
+    assert list(runtime.iterdir()) == []
+
+
+@pytest.mark.asyncio
 async def test_close_terminates_active_commands_and_rejects_new_ones(
     command_stack, tmp_path: Path
 ) -> None:
@@ -290,6 +355,11 @@ async def test_stat_and_range_read(command_stack, tmp_path: Path) -> None:
     assert data["bytes_read"] == 4
     assert not data["eof"]
 
+    final = await inspector.read_file_range(str(remote_file), offset=6, max_bytes=4)
+    assert final["data"] == "6789"
+    assert final["bytes_read"] == 4
+    assert final["eof"]
+
 
 @pytest.mark.asyncio
 async def test_directory_listing_preserves_unusual_names(
@@ -306,6 +376,20 @@ async def test_directory_listing_preserves_unusual_names(
     names = {entry["name"]["data"] for entry in result["entries"]}
     assert names == {"line\nbreak.txt", "plain.txt"}
     assert result["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_directory_listing_rejects_non_directory_source(
+    command_stack, tmp_path: Path
+) -> None:
+    _runner, inspector, _master, _paths = command_stack
+    remote_file = tmp_path / "not-a-directory"
+    remote_file.write_text("data", encoding="utf-8")
+
+    with pytest.raises(RemoteMCPError) as raised:
+        await inspector.list_directory(str(remote_file))
+
+    assert raised.value.code == "invalid_remote_type"
 
 
 @pytest.mark.asyncio
@@ -328,3 +412,17 @@ async def test_range_limits_are_enforced(command_stack) -> None:
         )
 
     assert raised.value.code == "invalid_range"
+
+
+@pytest.mark.asyncio
+async def test_range_read_rejects_non_regular_source(
+    command_stack, tmp_path: Path
+) -> None:
+    _runner, inspector, _master, _paths = command_stack
+    directory = tmp_path / "directory"
+    directory.mkdir()
+
+    with pytest.raises(RemoteMCPError) as raised:
+        await inspector.read_file_range(str(directory))
+
+    assert raised.value.code == "invalid_remote_type"

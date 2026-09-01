@@ -20,11 +20,12 @@ TOOL_ROOT = Path(__file__).resolve().parents[2]
 LIVE_RUNNER = TOOL_ROOT / "tests/live_podman_e2e.py"
 TARGET_ALIAS = "remote-ssh-mcp-podman-e2e"
 SERVER_HOME = Path("/home/box")
-SERVER_LOCAL_ROOT = Path("/work/local-root")
+SERVER_REPOSITORY = Path("/work/src/remote_ssh_mcp")
 OWNER_LABEL = "remote-ssh-mcp.owner"
 RUN_LABEL = "remote-ssh-mcp.run"
 CLEANUP_ATTEMPTS = 5
 CLEANUP_RETRY_DELAY = 0.25
+LIVE_USER_NAMESPACE = "--userns=auto:size=2048"
 
 ResourceState = Literal["absent", "owned", "foreign", "error"]
 
@@ -38,6 +39,10 @@ def run_process(command: list[str], **options: Any) -> subprocess.CompletedProce
             raise ValueError("stdout and stderr may not be used with capture_output")
         options["stdout"] = subprocess.PIPE
         options["stderr"] = subprocess.PIPE
+    if input_data is not None:
+        if options.get("stdin") is not None:
+            raise ValueError("stdin and input may not be used together")
+        options["stdin"] = subprocess.PIPE
 
     process = subprocess.Popen(command, **options)
     try:
@@ -76,6 +81,7 @@ class Arguments:
     public_key: Path | None
     identity_file: Path | None
     preflight_only: bool
+    strip_session_environment: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,7 +283,7 @@ def validate_image_reference(reference: str, name: str) -> None:
         raise LiveFailure(f"{name} reference is empty or contains whitespace")
 
 
-def parse_policy(name: str, *, server: bool) -> list[str]:
+def parse_policy(name: str) -> list[str]:
     raw = os.environ.get(name, "")
     if not raw:
         raise LiveFailure(f"Make did not provide {name}")
@@ -292,14 +298,15 @@ def parse_policy(name: str, *, server: bool) -> list[str]:
         "--volume",
         "-v",
     )
-    if not server:
-        forbidden += ("--userns",)
     for option in options:
         if any(
             option == forbidden_option or option.startswith(f"{forbidden_option}=")
             for forbidden_option in forbidden
         ):
             raise LiveFailure(f"{name} contains harness-owned option {option}")
+    user_namespaces = [option for option in options if option.startswith("--userns")]
+    if user_namespaces != [LIVE_USER_NAMESPACE]:
+        raise LiveFailure(f"{name} must contain exactly {LIVE_USER_NAMESPACE}")
     return options
 
 

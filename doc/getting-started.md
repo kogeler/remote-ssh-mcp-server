@@ -2,146 +2,157 @@
 
 ## Requirements
 
-Local machine:
+The local machine needs Linux, OpenSSH, rsync, and the standard `false`
+utility. A source installation additionally needs CPython 3.13 or 3.14 with
+`venv`, Bash, and GNU Make. The remote account needs Linux, `/bin/sh`, rsync,
+GNU coreutils and findutils, `setsid`, and `/bin/kill`. The optional
+`sudo_exec` tool additionally requires sudo and `/bin/bash`.
 
-- Python 3.11 or newer with `venv` support
-- GNU Make
-- OpenSSH client
-- rsync
+### Standalone Linux executable
 
-Remote machine:
+Each GitHub Release contains `remote-ssh-mcp-linux-amd64` and
+`remote-ssh-mcp-linux-arm64`, built and smoke-tested natively on Ubuntu 26.04
+runners, plus `SHA256SUMS.txt`. Download all three files, run `sha256sum
+--check --ignore-missing SHA256SUMS.txt`, and install only the binary matching
+the local architecture on a compatible Linux system. Keep it in a dedicated
+writable directory: that directory is the standalone server's local file
+boundary and owns its private `.remote-ssh-mcp/` state. The binary still
+invokes the host's OpenSSH and rsync programs; it does not bundle or replace
+them.
 
-- Linux with `/bin/sh`
-- rsync
-- GNU coreutils and findutils
-- `setsid` from util-linux and `/bin/kill`
-- sudo only when `sudo_exec` is required
+### Source checkout
 
-## Installation
-
-Clone or copy the repository as one directory. Keep the `remote-ssh-mcp`
-launcher beside `requirements.txt`, `remote-ssh-mcp.py`, and the
-`remote_ssh_mcp/` package. Add the repository root to `PATH`:
+Clone the repository, enter its root, prepare the explicit runtime, and check
+the launcher:
 
 ```bash
-export PATH="/path/to/remote-ssh-mcp:$PATH"
-cd /path/to/remote-ssh-mcp
+cd /path/to/remote-ssh-mcp-server
 make runtime-venv
+export PATH="$PWD:$PATH"
 remote-ssh-mcp --help
 ```
 
-`make runtime-venv` is mandatory before an MCP client starts the launcher. It is
-an explicit trust decision by the local user: the target installs third-party
-runtime code on the host into `venv-runtime/`. Installation accepts wheels
-only, requires every artifact to match a hash in `requirements.txt`, and records
-the successfully installed lock beside the environment. It removes the pip copy
-used to populate the venv, leaving only the locked runtime dependency tree.
+`make runtime-venv` resolves the exact published SSH library from PyPI and
+installs every third-party dependency as a hash-locked binary package. It then
+installs this checkout without dependencies. The target records the installed
+lock beside `venv-runtime/`, verifies package metadata with `pip check`, and
+removes pip from the completed runtime. Development tools are not installed
+there.
 
-The launcher performs no installation. It checks that `venv-runtime/` exists
-and that its recorded lock exactly matches the repository lock, then executes
-the server with `venv-runtime/bin/python`. A missing or stale environment fails
-with an instruction to run `make runtime-venv`; an MCP client can therefore
-never trigger pip or network access merely by starting the server.
+The launcher does not run pip and does not repair a missing or stale
+environment. It verifies the recorded runtime lock, the recorded project
+version, the installed MCP distribution, and the installed SSH distribution,
+then executes the installed MCP module with
+`venv-runtime/bin/python -I -m remote_ssh_mcp`. It imports the installed SSH
+distribution; the caller's current directory and inherited `PYTHONPATH` do not
+select application code. Both the validation probe and server entry point use
+Python isolated mode.
 
-Development tooling lives in `requirements-dev.txt` and is not installed into
-the runtime environment. Direct dependencies are maintained in
-`pyproject.toml`; the locks are generated from it.
+For a source checkout, the active virtual environment must be a direct child
+of this project, and the project must contain its launcher, version, and
+runtime-lock files. The server uses that verified venv owner as the local file
+boundary. It refuses a global Python environment or a venv detached from the
+project instead of deriving a boundary from the installed package under
+`site-packages`. It also rejects a project `.version` that does not match the
+active MCP package.
 
-Create a dedicated local root for uploads, downloads, and optional complete
-output spools:
+## MCP Client Setup
 
-```bash
-mkdir -m 700 "$HOME/remote-machine-files"
-```
+For Codex, copy the example into a trusted project's `.codex/config.toml`,
+ensure its command resolves to this project's launcher, and enable the server:
 
-The root must be absolute, owned by the current user, and not writable by group
-or other users. Every agent-selected local path is relative to this directory.
+- [Codex](examples/codex-config.toml)
 
-## Codex
+Keep the server name `remote_machine` if you want the supplied tool approval
+policy to match unchanged. Its 180-second startup deadline applies only to MCP
+process initialization, which performs no SSH authentication. The separate
+150-second tool deadline covers `connect`; the server itself limits master
+startup to 120 seconds by default.
 
-Copy [the Codex example](examples/codex-config.toml) into a trusted project's
-`.codex/config.toml`, then:
-
-1. Replace `/absolute/path/to/allowed-local-root`.
-2. Set `enabled = true` when the server should be available.
-3. Keep the server name `remote_machine` if the documented tool policy should
-   match without changes.
-
-The example exposes all 13 tools and prompts for connection lifecycle,
-commands, sudo, transfers, and cancellation. See the official
-[Codex configuration reference](https://developers.openai.com/codex/config-reference).
-
-## Claude Code
-
-For a personal registration scoped to the current project:
+For a personal Claude Code registration scoped to the current project:
 
 ```bash
 claude mcp add --transport stdio --scope local remote_machine -- \
-  remote-ssh-mcp --local-root /absolute/path/to/allowed-local-root
+  remote-ssh-mcp
 claude mcp get remote_machine
 ```
 
-For a shared project registration, adapt
-[`examples/claude-code-mcp.json`](examples/claude-code-mcp.json) as `.mcp.json`
-or use the same command with `--scope project`.
+For a shared registration, adapt the [server example](examples/claude-code-mcp.json)
+as `.mcp.json` or use the same command with `--scope project`. Merge the
+[permissions example](examples/claude-code-settings.json) into the appropriate
+Claude settings file. Its names assume the server remains `remote_machine`.
 
-Merge [`examples/claude-code-settings.json`](examples/claude-code-settings.json)
-into `.claude/settings.local.json` for a private policy or
-`.claude/settings.json` for a shared policy. The example allows passive tools
-and asks before state-changing operations. Its permission names assume the MCP
-server is named `remote_machine`.
-
-Use `/mcp`, `claude mcp list`, or `claude mcp get remote_machine` for diagnosis.
-See Claude Code's official [MCP](https://code.claude.com/docs/en/mcp) and
-[permissions](https://code.claude.com/docs/en/permissions) documentation.
-
-## Connect To A Machine
-
-The MCP process starts disconnected. Targets never appear in client startup
-configuration.
-
-Use an alias from the standard OpenSSH configuration when it carries identity,
-proxy, host-key, or hardware-token settings:
+The server starts disconnected. Connect with a trusted OpenSSH alias:
 
 ```json
 {"ssh_alias":"production-app"}
 ```
 
-Or provide a direct target; `port` defaults to 22:
+or with a direct authority:
 
 ```json
 {"host":"host.example","user":"deploy","port":2222}
 ```
 
-The `connect` call may open the normal system PIN dialog and request a hardware
-key touch. Later operations reuse the same authenticated master. Call
-`disconnect` before changing targets. A lost connection is never reopened
-automatically.
+`port` is optional in direct mode and defaults to `22`.
 
-## Server Options
+Only `connect` may authenticate. Call `disconnect` before changing authority
+or deliberately reconnecting after transport loss.
+
+Some stdio clients remove graphical-session and SSH-agent variables. On Linux,
+the connection library may query logind for the current UID's runtime directory
+and read the active user systemd manager environment. Recovery is restricted to
+`DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`, `XDG_RUNTIME_DIR`,
+`DBUS_SESSION_BUS_ADDRESS`, `SSH_AUTH_SOCK`, `SSH_ASKPASS`, and
+`SSH_ASKPASS_REQUIRE`; an existing non-empty value always wins. The recovered
+mapping belongs only to the initial OpenSSH master subprocess. It is never
+passed to commands, transfers, or remote payloads. Unsupported platforms,
+missing systemd tools, invalid runtime state, or an unavailable user manager
+make recovery a safe no-op.
+
+PIN and passphrase entry remains entirely in native OpenSSH and its normal
+system prompt. The MCP protocol accepts no credential or PIN.
+
+## Options
 
 ```text
---local-root PATH          required local containment root
---connect-timeout SECONDS  SSH master startup deadline (default 120)
---command-timeout SECONDS  command deadline (default 120)
---max-output-bytes BYTES   captured bytes per stream (default 1048576)
---max-transfers COUNT      concurrent transfers (default 2)
---log-level LEVEL          DEBUG, INFO, WARNING, or ERROR
+-h, --help                 show command help and exit
+--version                  show the installed server version and exit
+--connect-timeout SECONDS  SSH master deadline, 0.1..900 (default 120)
+--command-timeout SECONDS  command deadline, 0.1..86400 (default 120)
+--max-output-bytes BYTES   per-stream capture, 1024..67108864 (default 1048576)
+--max-transfers COUNT      concurrent transfers, 1..16 (default 2)
+--log-level LEVEL          DEBUG, INFO, WARNING, or ERROR (default INFO)
 ```
 
-Allow enough client tool time for interactive hardware authentication. The
-Codex example uses a 150-second tool timeout.
+The Codex example's 150-second per-tool deadline is longer than both server
+defaults. If you deliberately raise an individual command timeout above that
+value, raise the client's tool deadline as well or the client will cancel the
+call first.
+
+Local upload, download, and spool paths are relative to the selected local
+root, not the caller's current working directory. That root is the source
+project for the launcher and the executable's directory for a standalone
+binary. See [MCP tools](tools.md) for the
+complete operation contract and [Security](security.md) before granting write
+or sudo approval.
 
 ## Troubleshooting
 
 - `not_connected`: call `connect` first.
-- `already_connected` or `disconnect_required`: disconnect before selecting a
-  new target or retrying after master loss.
-- `connection_start_failed`: test ordinary OpenSSH with the same target and
+- `already_connected` or `disconnect_required`: disconnect before choosing a
+  different target or retrying after master loss.
+- `connection_start_failed`: run ordinary OpenSSH with the same target and
   resolve host-key, token, proxy, or network errors locally.
-- `connection_lost`: disconnect explicitly, then reconnect only when a new
+- An error saying no usable interactive system prompt is available means the
+  bounded OpenSSH diagnostic matched a missing askpass route and session
+  recovery did not find one. Start a normal graphical user session and import
+  its environment into the user systemd manager; do not copy display or socket
+  paths into shared MCP configuration.
+- `connection_lost`: disconnect, then reconnect only when another
   authentication is intended.
-- `sudo_password_required`: add an appropriate NOPASSWD rule or avoid
+- `sudo_password_required`: add an appropriately narrow NOPASSWD rule or avoid
   `sudo_exec`; cached authentication is deliberately ignored.
-- Failed transfer: inspect its structured error and bounded stderr tail, fix
-  permissions or space, then start the same source and destination to resume.
+- After a failed transfer, inspect the structured error and bounded stderr
+  tail, fix permissions or free space, and start the same source/destination
+  pair to resume its deterministic partial.

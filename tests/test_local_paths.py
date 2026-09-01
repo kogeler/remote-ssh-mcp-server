@@ -22,6 +22,16 @@ def test_internal_directories_are_private(policy: LocalPathPolicy) -> None:
     assert (policy.internal_root / "spool").stat().st_mode & 0o777 == 0o700
 
 
+def test_internal_directories_remain_private_below_shared_root(tmp_path: Path) -> None:
+    tmp_path.chmod(0o777)
+
+    policy = LocalPathPolicy(tmp_path)
+    policy.initialize()
+
+    assert tmp_path.stat().st_mode & 0o777 == 0o777
+    assert policy.internal_root.stat().st_mode & 0o777 == 0o700
+
+
 def test_internal_directory_cannot_be_a_symlink(tmp_path: Path) -> None:
     outside = tmp_path.parent / f"{tmp_path.name}-internal-outside"
     outside.mkdir()
@@ -32,7 +42,7 @@ def test_internal_directory_cannot_be_a_symlink(tmp_path: Path) -> None:
 
 
 def test_existing_file_resolves_inside_root(policy: LocalPathPolicy) -> None:
-    expected = policy.root / "nested" / "file.txt"
+    expected = policy.repository / "nested" / "file.txt"
     expected.parent.mkdir()
     expected.write_text("data", encoding="utf-8")
 
@@ -60,7 +70,7 @@ def test_symlink_escape_is_rejected(policy: LocalPathPolicy, tmp_path: Path) -> 
     outside = tmp_path.parent / f"{tmp_path.name}-outside"
     outside.mkdir()
     (outside / "secret").write_text("secret", encoding="utf-8")
-    (policy.root / "escape").symlink_to(outside, target_is_directory=True)
+    (policy.repository / "escape").symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(RemoteMCPError, match="escapes"):
         policy.resolve_existing("escape/secret")
@@ -72,7 +82,7 @@ def test_destination_requires_existing_parent(policy: LocalPathPolicy) -> None:
 
 
 def test_destination_refuses_overwrite(policy: LocalPathPolicy) -> None:
-    destination = policy.root / "result.bin"
+    destination = policy.repository / "result.bin"
     destination.write_bytes(b"old")
 
     with pytest.raises(RemoteMCPError) as raised:
@@ -84,9 +94,9 @@ def test_destination_refuses_overwrite(policy: LocalPathPolicy) -> None:
 def test_destination_rejects_symlink_even_when_target_is_inside(
     policy: LocalPathPolicy,
 ) -> None:
-    target = policy.root / "target"
+    target = policy.repository / "target"
     target.write_text("data", encoding="utf-8")
-    link = policy.root / "link"
+    link = policy.repository / "link"
     link.symlink_to(target)
 
     with pytest.raises(RemoteMCPError, match="symbolic link"):
@@ -99,4 +109,4 @@ def test_spool_paths_are_unique_and_contained(policy: LocalPathPolicy) -> None:
 
     assert first != second
     assert first.parent == policy.internal_root / "spool"
-    assert os.path.commonpath((policy.root, first)) == str(policy.root)
+    assert os.path.commonpath((policy.repository, first)) == str(policy.repository)

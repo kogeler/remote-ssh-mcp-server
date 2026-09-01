@@ -131,6 +131,23 @@ def test_fido_mode_rejects_a_server_container() -> None:
     assert "hardware key on this host" in completed.stderr
 
 
+def test_stripped_environment_case_requires_host_side_mcp_fido_mode() -> None:
+    completed = run_harness(
+        "--mode",
+        "ephemeral",
+        "--image",
+        UNUSED_IMAGE,
+        "--strip-session-environment",
+        "--preflight-only",
+    )
+
+    assert completed.returncode != 0
+    assert (
+        "--strip-session-environment requires the host-side MCP FIDO mode"
+        in completed.stderr
+    )
+
+
 def test_harness_rejects_unknown_arguments() -> None:
     completed = run_harness("--image", UNUSED_IMAGE, "--key-mode", "ephemeral")
 
@@ -171,8 +188,12 @@ esac
             "PODMAN": str(fake_podman),
             "FAKE_CHILD_PID": str(child_pid),
             "FAKE_NETWORK_NAME": str(network_name),
-            "REMOTE_SSH_MCP_LIVE_TARGET_CONFINE": "--cap-drop=ALL",
-            "REMOTE_SSH_MCP_LIVE_SERVER_CONFINE": "--cap-drop=ALL",
+            "REMOTE_SSH_MCP_LIVE_TARGET_CONFINE": (
+                "--userns=auto:size=2048 --cap-drop=ALL"
+            ),
+            "REMOTE_SSH_MCP_LIVE_SERVER_CONFINE": (
+                "--userns=auto:size=2048 --cap-drop=ALL"
+            ),
             "TMPDIR": str(tmp_path),
         }
     )

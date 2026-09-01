@@ -5,7 +5,7 @@ Every input model is strict and rejects unknown fields. Responses contain an
 
 | Tool | Purpose |
 | --- | --- |
-| `connect` | Open one SSH master using an alias or host/user/port. |
+| `connect` | Open one SSH master using an alias or host/user with an optional port. |
 | `disconnect` | Cancel active work and close the owned master. |
 | `connection_status` | Report lifecycle state without opening SSH. |
 | `exec` | Run one bounded non-PTY shell command. |
@@ -22,22 +22,26 @@ Every input model is strict and rejects unknown fields. Responses contain an
 ## Connection Lifecycle
 
 `connection_status` reports `disconnected`, `starting`, `ready`, or `lost`.
-Only `connect` can authenticate. One server owns at most one target and one
+Only `connect` can authenticate. Direct mode requires `host` and `user`; its
+optional `port` defaults to `22`. One server owns at most one target and one
 master, and `disconnect` is idempotent. After master loss, operational tools
 return `connection_lost`; the caller must disconnect before an explicitly
 approved reconnect.
 
 ## Commands
 
-`exec` and `sudo_exec` run independent non-interactive shells. A command's
-working directory, variables, aliases, and other shell state do not persist.
-The optional `cwd` applies only to the current invocation.
+`exec` and `sudo_exec` run independent non-interactive shells. `exec` uses
+`/bin/sh`; `sudo_exec` uses a fixed `/bin/bash --noprofile --norc -s` program.
+A command's working directory, variables, aliases, and other shell state do not
+persist. The optional `cwd` applies only to the current invocation. A command
+is limited to 1,048,576 UTF-8 bytes; an explicit timeout must be between 0.1
+and 86,400 seconds.
 
 Results separate stdout and stderr and include exit code, duration, timeout,
 captured bytes, total bytes, and truncation state. UTF-8 data is returned as
 text; other bytes are base64 encoded. Capture is limited by
 `--max-output-bytes`. Set `spool_output=true` only when complete streams must be
-written under the protected local root.
+written under the local root's private internal directory.
 
 `sudo_exec` always starts sudo with non-interactive and timestamp-invalidation
 semantics: `sudo -n -k`. It succeeds only when sudoers allows the Bash command
@@ -49,7 +53,10 @@ command failures are distinct outcomes.
 Inspection tools quote remote paths and return structured metadata rather than
 parsing terminal layout. Directory entries preserve unusual byte sequences by
 returning UTF-8 or base64-encoded names. Range reads never return more than the
-requested bound or the configured output limit.
+requested bound or the configured output limit. `list_directory` rejects a
+non-directory source, and `read_file_range` rejects a non-regular-file source.
+Its `eof` flag is true when the returned range reaches the file's end,
+including an exact-length final range.
 
 ## Large File Transfers
 
@@ -79,10 +86,14 @@ Public errors use stable identifiers such as:
 
 - `not_connected`, `already_connected`, `disconnect_required`
 - `connection_start_failed`, `connection_lost`
-- `invalid_arguments`, `invalid_command`, `invalid_local_path`
+- `invalid_arguments`, `invalid_command`, `invalid_local_path`, `invalid_remote_type`
 - `local_path_exists`, `remote_path_exists`, `remote_path_not_found`
 - `sudo_unavailable`, `sudo_password_required`, `sudo_not_allowed`
 - `transfer_not_found`, `transfer_failed`, `verification_failed`
 
 Human-readable messages provide context, but automation should use the error
 identifier rather than localized OpenSSH, rsync, or sudo text.
+The initial master's raw stderr is never public. A recognized missing
+interactive askpass route uses the stable message `SSH authentication requires
+an interactive system prompt, but no usable user session environment was
+available`; unknown early exits retain a concise status-only message.

@@ -1,4 +1,4 @@
-"""Contain every model-selected local path below one configured root."""
+"""Contain every model-selected local path below the server's local root."""
 
 from __future__ import annotations
 
@@ -13,11 +13,11 @@ INTERNAL_DIRECTORY = ".remote-ssh-mcp"
 
 
 class LocalPathPolicy:
-    def __init__(self, root: Path) -> None:
-        self.root = root.resolve(strict=True)
-        if not self.root.is_dir():
+    def __init__(self, repository: Path) -> None:
+        self.repository = repository.resolve(strict=True)
+        if not self.repository.is_dir():
             raise RemoteMCPError("invalid_local_path", "local root is not a directory")
-        self.internal_root = self.root / INTERNAL_DIRECTORY
+        self.internal_root = self.repository / INTERNAL_DIRECTORY
 
     def initialize(self) -> None:
         self._ensure_private_directory(self.internal_root)
@@ -65,7 +65,7 @@ class LocalPathPolicy:
         normalized = Path(*[part for part in path.parts if part not in ("", ".")])
         if not normalized.parts:
             raise RemoteMCPError(
-                "invalid_local_path", "local path cannot resolve to the root"
+                "invalid_local_path", "local path cannot resolve to the repository"
             )
         if normalized.parts[0] == INTERNAL_DIRECTORY:
             raise RemoteMCPError(
@@ -75,17 +75,17 @@ class LocalPathPolicy:
 
     def _contained(self, path: Path) -> Path:
         try:
-            path.relative_to(self.root)
+            path.relative_to(self.repository)
         except ValueError as error:
             raise RemoteMCPError(
-                "invalid_local_path", "local path escapes the configured root"
+                "invalid_local_path", "local path escapes the server's local root"
             ) from error
         return path
 
     def resolve_existing(self, value: str, *, require_file: bool = False) -> Path:
         relative = self._relative(value)
         try:
-            resolved = (self.root / relative).resolve(strict=True)
+            resolved = (self.repository / relative).resolve(strict=True)
         except (OSError, RuntimeError) as error:
             raise RemoteMCPError(
                 "invalid_local_path",
@@ -100,7 +100,7 @@ class LocalPathPolicy:
 
     def resolve_destination(self, value: str, *, overwrite: bool = False) -> Path:
         relative = self._relative(value)
-        candidate = self.root / relative
+        candidate = self.repository / relative
         try:
             parent = candidate.parent.resolve(strict=True)
         except (OSError, RuntimeError) as error:
@@ -138,4 +138,6 @@ class LocalPathPolicy:
         return self.internal_path("spool", secrets.token_hex(16), f".{stream_name}")
 
     def display(self, path: Path) -> str:
-        return str(self._contained(path.resolve(strict=False)).relative_to(self.root))
+        return str(
+            self._contained(path.resolve(strict=False)).relative_to(self.repository)
+        )

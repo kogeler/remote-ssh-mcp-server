@@ -14,12 +14,16 @@ import hashlib
 import os
 import shlex
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from mcp import ClientSession, StdioServerParameters, stdio_client
 from mcp.types import CallToolResult
+from ssh_wrapper.session_environment import SESSION_ENVIRONMENT_VARIABLES
 
 REMOTE_ROOT = "/srv/remote-ssh-mcp-e2e"
 FINAL_STATES = {"completed", "failed", "cancelled"}
@@ -34,17 +38,22 @@ def required_environment(name: str) -> str:
 
 CONTAINER = required_environment("REMOTE_SSH_MCP_E2E_CONTAINER")
 TARGET = required_environment("REMOTE_SSH_MCP_E2E_TARGET")
-LOCAL_ROOT = Path(required_environment("REMOTE_SSH_MCP_E2E_LOCAL_ROOT"))
-LAUNCHER = Path(__file__).resolve().parents[1] / "remote-ssh-mcp"
+REPOSITORY_ROOT = Path(required_environment("REMOTE_SSH_MCP_E2E_REPOSITORY"))
+LAUNCHER = Path(
+    os.environ.get("REMOTE_SSH_MCP_E2E_LAUNCHER", REPOSITORY_ROOT / "remote-ssh-mcp")
+)
 PODMAN = os.environ.get("PODMAN", "podman")
 
 # The server under test runs either on this host, next to a hardware key, or in
 # a second container on a private network with the target. SERVER_CONTAINER
-# selects which, and every access to the server's own local root goes through
+# selects which, and every access to the server's repository goes through
 # the helpers below so the matrix itself does not care.
 SERVER_CONTAINER = os.environ.get("REMOTE_SSH_MCP_E2E_SERVER_CONTAINER", "")
 SSH_CONFIG = os.environ.get("REMOTE_SSH_MCP_TEST_SSH_CONFIG", "")
 WRAPPER_DIR = os.environ.get("REMOTE_SSH_MCP_E2E_WRAPPER_DIR", "")
+STRIP_SESSION_ENVIRONMENT = (
+    os.environ.get("REMOTE_SSH_MCP_E2E_STRIP_SESSION_ENVIRONMENT") == "1"
+)
 
 
 def evidence(message: str) -> None:
@@ -112,7 +121,7 @@ def target_interface() -> str:
 
 
 def local_run(*arguments: str, input_data: bytes | None = None) -> bytes:
-    """Run a command on whichever side owns the server's local root."""
+    """Run a command on whichever side owns the server repository."""
     command = list(arguments)
     if SERVER_CONTAINER:
         command = [PODMAN, "exec", "--interactive", SERVER_CONTAINER, *arguments]
@@ -218,12 +227,7 @@ def install_sudo_policy(mode: str) -> None:
 
 
 def seed_global_sudo_timestamp() -> None:
-    script = (
-        "set -e; password=$(cat /run/remote-ssh-mcp-e2e.password); "
-        "printf '%s\\n' \"$password\" | "
-        "runuser -u mcp-test -- sudo -S -v >/dev/null 2>&1; unset password"
-    )
-    run_target("/bin/bash", "-c", script)
+    run_target("runuser", "-u", "mcp-test", "--", "sudo", "-n", "-v")
 
 
 def set_download_rate_limit(enabled: bool) -> None:
@@ -530,7 +534,9 @@ async def exercise_sudo(session: ClientSession) -> None:
     await call_error(
         session, "sudo_exec", {"command": "id -u"}, "sudo_password_required"
     )
+    install_sudo_policy("nopasswd")
     seed_global_sudo_timestamp()
+    install_sudo_policy("password")
     await call_error(
         session, "sudo_exec", {"command": "id -u"}, "sudo_password_required"
     )
@@ -553,11 +559,11 @@ async def exercise_transfers(session: ClientSession, marker: bytes) -> None:
     assert "data" not in repr(download_start)
     download = await wait_transfer(session, download_id)
     assert download["state"] == "completed"
-    local_download = LOCAL_ROOT / "downloads/large-download.bin"
+    local_download = REPOSITORY_ROOT / "downloads/large-download.bin"
     assert download["sha256"] == local_sha256(local_download)
     assert marker.decode() not in repr(download)
 
-    upload_source = LOCAL_ROOT / "upload-large.bin"
+    upload_source = REPOSITORY_ROOT / "upload-large.bin"
     upload_hash = provide_upload_source(upload_source, marker, 16 * 1024 * 1024)
     upload_id, _ = await start_transfer(
         session,
@@ -648,7 +654,7 @@ async def exercise_transfers(session: ClientSession, marker: bytes) -> None:
     )
     unusual = await wait_transfer(session, unusual_id)
     assert unusual["state"] == "completed"
-    assert local_read(LOCAL_ROOT / "downloads/unusual.txt") == b"unusual-data"
+    assert local_read(REPOSITORY_ROOT / "downloads/unusual.txt") == b"unusual-data"
 
     await call_error(
         session,
@@ -659,7 +665,7 @@ async def exercise_transfers(session: ClientSession, marker: bytes) -> None:
         },
         "invalid_local_path",
     )
-    local_symlink(LOCAL_ROOT / "escape-link", "/tmp")
+    local_symlink(REPOSITORY_ROOT / "escape-link", "/tmp")
     await call_error(
         session,
         "download_start",
@@ -690,7 +696,7 @@ async def exercise_transfers(session: ClientSession, marker: bytes) -> None:
     finally:
         set_download_rate_limit(False)
 
-    partial_size = local_largest_partial(LOCAL_ROOT / ".remote-ssh-mcp/partials")
+    partial_size = local_largest_partial(REPOSITORY_ROOT / ".remote-ssh-mcp/partials")
     assert partial_size > 0
     resume_id, _ = await start_transfer(
         session,
@@ -703,7 +709,7 @@ async def exercise_transfers(session: ClientSession, marker: bytes) -> None:
     resumed = await wait_transfer(session, resume_id)
     assert resumed["state"] == "completed"
     assert resumed["total_bytes"] == 128 * 1024 * 1024
-    assert resumed["sha256"] == local_sha256(LOCAL_ROOT / "downloads/resumed.bin")
+    assert resumed["sha256"] == local_sha256(REPOSITORY_ROOT / "downloads/resumed.bin")
 
     set_download_rate_limit(True)
     active_ids: list[str] = []
@@ -825,8 +831,6 @@ async def prove_explicit_disconnect(
 def server_parameters(environment: dict[str, str]) -> StdioServerParameters:
     """Describe how to start the server under test on the selected side."""
     options = [
-        "--local-root",
-        str(LOCAL_ROOT),
         "--connect-timeout",
         "300",
         "--command-timeout",
@@ -845,10 +849,10 @@ def server_parameters(environment: dict[str, str]) -> StdioServerParameters:
                 "exec",
                 "--interactive",
                 "--workdir",
-                str(LOCAL_ROOT),
+                str(REPOSITORY_ROOT),
                 SERVER_CONTAINER,
                 "/usr/local/bin/python",
-                "/work/src/remote-ssh-mcp.py",
+                "/work/src/remote_ssh_mcp/remote-ssh-mcp.py",
                 *options,
             ],
             env=environment,
@@ -857,26 +861,39 @@ def server_parameters(environment: dict[str, str]) -> StdioServerParameters:
         command=str(LAUNCHER),
         args=options,
         env=environment,
-        cwd=LOCAL_ROOT,
+        cwd=Path(SSH_CONFIG).parent,
     )
 
 
 async def main() -> None:
-    assert LOCAL_ROOT.is_absolute()
+    assert REPOSITORY_ROOT.is_absolute()
     marker = b"REMOTE_SSH_MCP_TRANSFER_PAYLOAD_SENTINEL_8d73374c"
     environment = os.environ.copy()
     if SERVER_CONTAINER:
         stderr_path = Path(required_environment("REMOTE_SSH_MCP_E2E_STDERR"))
     else:
-        assert LOCAL_ROOT.is_dir()
+        assert REPOSITORY_ROOT.is_dir()
+        assert LAUNCHER.parent == REPOSITORY_ROOT
         assert Path(SSH_CONFIG).is_file()
         assert Path(WRAPPER_DIR, "ssh").is_file()
-        stderr_path = LOCAL_ROOT / "server.stderr"
+        stderr_path = Path(required_environment("REMOTE_SSH_MCP_E2E_STDERR"))
         environment["PATH"] = f"{WRAPPER_DIR}:{environment['PATH']}"
         environment["REMOTE_SSH_MCP_TEST_SSH_CONFIG"] = SSH_CONFIG
+    if STRIP_SESSION_ENVIRONMENT:
+        assert not SERVER_CONTAINER
+        removed = {
+            name: environment.pop(name, None) for name in SESSION_ENVIRONMENT_VARIABLES
+        }
+        assert any(removed.values()), (
+            "no active session environment was available to strip"
+        )
+        assert all(name not in environment for name in SESSION_ENVIRONMENT_VARIABLES)
+        evidence("MCP subprocess session environment was deliberately sanitized")
     parameters = server_parameters(environment)
 
-    with stderr_path.open("w+", encoding="utf-8") as errlog:
+    with stderr_path.open(  # noqa: ASYNC230 - opened before process supervision.
+        "w+", encoding="utf-8"
+    ) as errlog:
         async with (
             stdio_client(parameters, errlog=errlog) as (read, write),
             ClientSession(read, write, read_timeout_seconds=360) as session,
@@ -966,10 +983,7 @@ async def main() -> None:
     assert '"jsonrpc"' not in diagnostics
     assert marker.decode() not in diagnostics
     assert "PRIVATE KEY" not in diagnostics
-    assert "remote-ssh-mcp-e2e.password" not in diagnostics
-    evidence(
-        "stderr contains no protocol, private key, password file, or payload marker"
-    )
+    evidence("stderr contains no protocol, private key, or payload marker")
     print("E2E_COMPLETE", flush=True)
 
 

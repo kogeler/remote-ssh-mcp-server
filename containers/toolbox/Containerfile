@@ -35,8 +35,10 @@ RUN python -m pip install --quiet --only-binary=:all: \
         pyproject-hooks==1.2.0 \
         wheel==0.48.0
 
-COPY containers/toolbox/entrypoint.sh /usr/local/sbin/toolbox-entrypoint
-RUN chmod 0755 /usr/local/sbin/toolbox-entrypoint
+COPY remote_ssh_mcp/containers/toolbox/entrypoint.sh /usr/local/sbin/toolbox-entrypoint
+COPY remote_ssh_mcp/tools/container_payload.py /usr/local/libexec/container-payload
+RUN chmod 0755 /usr/local/sbin/toolbox-entrypoint \
+    /usr/local/libexec/container-payload
 
 USER box
 WORKDIR /work
@@ -64,13 +66,17 @@ RUN apt-get update \
         shellcheck \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements-dev.txt /tmp/requirements-dev.txt
+COPY remote_ssh_mcp/requirements-dev.txt /tmp/requirements-dev.txt
 RUN python -m pip install --quiet --require-hashes \
+        --only-binary=:all: \
         --requirement /tmp/requirements-dev.txt \
+    && python -m pip check \
     && rm -f /tmp/requirements-dev.txt
 
-COPY containers/toolbox/entrypoint.sh /usr/local/sbin/toolbox-entrypoint
-RUN chmod 0755 /usr/local/sbin/toolbox-entrypoint
+COPY remote_ssh_mcp/containers/toolbox/entrypoint.sh /usr/local/sbin/toolbox-entrypoint
+COPY remote_ssh_mcp/tools/container_payload.py /usr/local/libexec/container-payload
+RUN chmod 0755 /usr/local/sbin/toolbox-entrypoint \
+    /usr/local/libexec/container-payload
 
 USER box
 WORKDIR /work

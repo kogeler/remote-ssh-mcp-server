@@ -1,0 +1,18 @@
+# Run the immutable actionlint binary behind the same validated payload entry
+# point and unprivileged Python base as the other repository checks.
+ARG ACTIONLINT_IMAGE
+FROM ${ACTIONLINT_IMAGE} AS actionlint
+
+FROM docker.io/library/python:3.13-slim@sha256:8fef26df932191825664e4957ff488c96dfe64918327634a357a55facbc994d3
+
+RUN useradd --create-home --uid 1000 --shell /bin/bash box
+
+COPY --from=actionlint /usr/local/bin/actionlint /usr/local/bin/actionlint
+COPY remote_ssh_mcp/containers/toolbox/entrypoint.sh /usr/local/sbin/toolbox-entrypoint
+COPY remote_ssh_mcp/tools/container_payload.py /usr/local/libexec/container-payload
+RUN chmod 0755 /usr/local/bin/actionlint /usr/local/sbin/toolbox-entrypoint \
+    /usr/local/libexec/container-payload
+
+USER box
+WORKDIR /work
+ENTRYPOINT ["/usr/local/sbin/toolbox-entrypoint"]

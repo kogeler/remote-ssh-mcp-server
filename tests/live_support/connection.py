@@ -6,14 +6,16 @@ import json
 import os
 import shutil
 import sys
-import tarfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+
+from tools import container_payload
 
 from .process import (
     OWNER_LABEL,
     RUN_LABEL,
     SERVER_HOME,
     TARGET_ALIAS,
+    TOOL_ROOT,
     ConnectionFiles,
     KeyMaterial,
     LiveFailure,
@@ -70,6 +72,7 @@ def prepare_connection_files(
     key: KeyMaterial,
     test_dir: Path,
     containerised_server: bool,
+    target_port: int,
 ) -> ConnectionFiles:
     host_key = test_dir / "host-key.pub"
     host_key.write_bytes(
@@ -87,7 +90,7 @@ def prepare_connection_files(
 
     if containerised_server:
         ssh_host = "live-target"
-        ssh_port = 22
+        ssh_port = target_port
         known_hosts.write_text(
             f"{ssh_host} {host_key.read_text(encoding='utf-8').strip()}\n",
             encoding="utf-8",
@@ -100,7 +103,7 @@ def prepare_connection_files(
             resources,
             "port",
             target,
-            "22/tcp",
+            f"{target_port}/tcp",
             purpose="reading the target SSH port",
         )
         if not published.startswith("127.0.0.1:"):
@@ -163,24 +166,56 @@ def prepare_connection_files(
     )
 
 
+def prepare_host_server_repository(test_dir: Path) -> Path:
+    workspace = test_dir / "server-workspace"
+    workspace.mkdir(mode=0o700)
+    repository = workspace / "remote_ssh_mcp"
+    repository.mkdir(mode=0o700)
+    (repository / "downloads").mkdir(mode=0o700)
+    for name in ("remote-ssh-mcp", "remote-ssh-mcp.py", "requirements.txt"):
+        shutil.copy2(TOOL_ROOT / name, repository / name)
+    for name in ("remote_ssh_mcp", "venv-runtime"):
+        (repository / name).symlink_to(TOOL_ROOT / name, target_is_directory=True)
+    return repository
+
+
 def receive_work_tree(test_dir: Path, staging: Path) -> Path:
+    incoming = test_dir / "incoming-work-tree"
     archive = test_dir / "server-source.tar"
-    with archive.open("wb") as destination:
-        shutil.copyfileobj(sys.stdin.buffer, destination)
-    if archive.stat().st_size == 0:
-        raise LiveFailure("automatic live received an empty work-tree archive")
-    with tarfile.open(archive, "r") as source:
-        names = set(source.getnames())
-        if "remote-ssh-mcp.py" not in names or not any(
-            name.startswith("remote_ssh_mcp/") for name in names
-        ):
-            raise LiveFailure("work-tree archive does not contain the MCP server")
-        if any(
-            name == ".live-server" or name.startswith(".live-server/") for name in names
-        ):
-            raise LiveFailure("work tree contains the reserved .live-server path")
-    with tarfile.open(archive, "a") as destination:
-        destination.add(staging, arcname=".live-server", recursive=True)
+    container_payload.extract_archive(sys.stdin.buffer, incoming)
+    paths = tuple(
+        path.relative_to(incoming).as_posix()
+        for path in incoming.rglob("*")
+        if path.is_file()
+    )
+    if "remote_ssh_mcp/remote-ssh-mcp.py" not in paths or not any(
+        name.startswith("remote_ssh_mcp/remote_ssh_mcp/") for name in paths
+    ):
+        raise LiveFailure("work-tree payload does not contain the MCP server")
+    if any(
+        name == "remote_ssh_mcp/.live-server"
+        or name.startswith("remote_ssh_mcp/.live-server/")
+        for name in paths
+    ):
+        raise LiveFailure("work tree contains the reserved .live-server path")
+    entries = [
+        container_payload.PayloadEntry(path, PurePosixPath(relative))
+        for relative in paths
+        if (path := incoming / relative).is_file()
+    ]
+    entries.extend(
+        container_payload.PayloadEntry(
+            path,
+            PurePosixPath("remote_ssh_mcp/.live-server")
+            / path.relative_to(staging).as_posix(),
+        )
+        for path in staging.rglob("*")
+        if path.is_file()
+    )
+    with archive.open("xb") as destination:
+        container_payload.write_archive(destination, entries)
+    archive.chmod(0o600)
+    shutil.rmtree(incoming)
     return archive
 
 
@@ -288,9 +323,7 @@ def provision_server(
 
     staging = test_dir / "server-stage"
     ssh_staging = staging / "home/.ssh"
-    local_staging = staging / "local-root/downloads"
     ssh_staging.mkdir(parents=True, mode=0o700)
-    local_staging.mkdir(parents=True, mode=0o700)
     shutil.copy2(connection.ssh_config, ssh_staging / "config")
     shutil.copy2(test_dir / "known_hosts", ssh_staging / "known_hosts")
     shutil.copy2(key.identity_file, ssh_staging / "id_ed25519")
@@ -298,8 +331,7 @@ def provision_server(
         path.chmod(0o600)
     archive = receive_work_tree(test_dir, staging)
     prepare_script = (
-        'install -d -m 0700 "$HOME/.ssh" /work/local-root '
-        "/work/local-root/downloads; "
+        'install -d -m 0700 "$HOME/.ssh" downloads; '
         'cp -- .live-server/home/.ssh/config "$HOME/.ssh/config"; '
         'cp -- .live-server/home/.ssh/known_hosts "$HOME/.ssh/known_hosts"; '
         'cp -- .live-server/home/.ssh/id_ed25519 "$HOME/.ssh/id_ed25519"; '
@@ -321,6 +353,18 @@ def provision_server(
             "streaming the work tree into the server",
             stdin=source,
         )
+    podman_exec(
+        resources,
+        server,
+        "/usr/local/bin/python",
+        "-I",
+        "-c",
+        (
+            "import importlib.metadata, ssh_wrapper; "
+            "assert importlib.metadata.version('ssh-wrapper') == '0.1.0'"
+        ),
+        purpose="verifying the published SSH wrapper dependency",
+    )
     verify_server_confinement(resources, server, network)
     return server
 

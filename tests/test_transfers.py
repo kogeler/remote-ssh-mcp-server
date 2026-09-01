@@ -99,7 +99,7 @@ def transfer_stack(
     )
     fake_rsync.chmod(0o755)
     config = replace(runtime_config, rsync_path=fake_rsync)
-    paths = LocalPathPolicy(config.local_root)
+    paths = LocalPathPolicy(config.repository_root)
     paths.initialize()
     master = LocalTransferMaster()
     runner = CommandRunner(config, master, paths)  # type: ignore[arg-type]
@@ -139,7 +139,7 @@ async def test_large_download_is_verified_and_atomically_published(
     started = await manager.start_download(str(source), "downloaded.bin")
     result = await wait_for_final(manager, str(started["operation_id"]))
 
-    assert result["state"] == "completed"
+    assert result["state"] == "completed", result
     assert len(str(result["operation_id"])) == 32
     assert result["bytes_transferred"] == len(payload)
     assert result["sha256"] == hashlib.sha256(payload).hexdigest()
@@ -308,7 +308,7 @@ async def test_upload_overwrite_replaces_existing_regular_file(
     )
     result = await wait_for_final(manager, str(started["operation_id"]))
 
-    assert result["state"] == "completed"
+    assert result["state"] == "completed", result
     assert destination.read_bytes() == b"replacement"
 
 

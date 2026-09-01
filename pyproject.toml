@@ -4,25 +4,23 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "remote-ssh-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "Bounded remote-machine tools for MCP clients over one OpenSSH master"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.13,<3.15"
 license = "MIT"
 license-files = ["LICENSE"]
 dependencies = [
     "mcp==2.0.0",
     "pydantic==2.13.4",
+    "ssh-wrapper==0.1.0",
 ]
 
 [project.optional-dependencies]
-# The full analysis and test environment. It is installed in the toolbox for
-# normal checks and on the host only for the explicitly selected host tests.
 dev = [
     "bandit[toml]==1.9.4",
+    "build==1.5.0",
     "mypy==2.3.1",
-    # Imported directly by the repository-layout tests, so both are declared as
-    # direct test dependencies rather than relying on a transitive tool tree.
     "packaging==26.3",
     "pip-audit==2.10.1",
     "pytest==9.1.1",
@@ -30,6 +28,13 @@ dev = [
     "pytest-cov==7.1.0",
     "pytest-xdist==3.8.0",
     "pyyaml==6.0.3",
+    "setuptools==84.0.0",
+]
+standalone = [
+    "pyinstaller==6.22.2",
+]
+docs = [
+    "mkdocs-material==9.7.7",
 ]
 
 [project.scripts]
@@ -40,12 +45,11 @@ include = ["remote_ssh_mcp*"]
 
 [tool.mypy]
 files = ["remote_ssh_mcp", "remote-ssh-mcp.py"]
-python_version = "3.11"
+python_version = "3.13"
 strict = true
 
 [tool.bandit]
-exclude_dirs = ["tests", "venv", "venv-runtime", "venv-lint"]
-# Runtime asserts narrow types after validated lifecycle and schema checks.
+exclude_dirs = ["tests", "venv-runtime", "venv-dev", "venv-lint", "venv-docs"]
 skips = ["B101"]
 
 [tool.coverage.run]
@@ -53,9 +57,6 @@ branch = true
 source = ["remote_ssh_mcp"]
 
 [tool.coverage.report]
-# Measured total is about 77.1%, with occasional jitter from timing-sensitive
-# branches. The gate keeps a small margin for that and for refactors while
-# still failing on a real regression.
 fail_under = 75
 precision = 2
 show_missing = true

@@ -25,10 +25,41 @@ REMOTE_SHELL_PROGRAM = "/bin/sh -s"
 def _supervised_remote_program(remote_program: str) -> str:
     """Wrap one trusted remote program with channel-loss process cleanup."""
 
+    watcher = """\
+group_pid=$1
+payload_pipe=$2
+watcher_gate=$3
+watcher_pid_pipe=$4
+runtime_dir=$5
+IFS= read -r armed < "$watcher_gate" || exit 75
+rm -f -- "$watcher_gate"
+IFS= read -r unexpected || true
+/bin/kill -TERM -- "-$group_pid" 2>/dev/null || true
+sleep 1
+/bin/kill -KILL -- "-$group_pid" 2>/dev/null || true
+rm -f -- "$payload_pipe"
+rm -f -- "$watcher_pid_pipe"
+rmdir -- "$runtime_dir" 2>/dev/null || true
+"""
+    child_runner = f"""\
+payload_pipe=$1
+watcher_gate=$2
+watcher_pid_pipe=$3
+runtime_dir=$4
+shift 4
+setsid /bin/sh -c {shlex.quote(watcher)} remote-ssh-mcp-watcher "$$" \
+    "$payload_pipe" "$watcher_gate" "$watcher_pid_pipe" "$runtime_dir" \
+    <&3 >/dev/null 2>&1 &
+watcher_pid=$!
+printf '%s\n' "$watcher_pid" > "$watcher_pid_pipe" || exit 76
+exec "$@"
+"""
     supervisor = f"""\
 umask 077
 runtime_dir=
 payload_pipe=
+watcher_gate=
+watcher_pid_pipe=
 child_pid=
 watcher_pid=
 startup_critical=0
@@ -43,14 +74,24 @@ terminate_child() {{
     wait "$child_pid" 2>/dev/null || true
     child_pid=
 }}
+stop_watcher() {{
+    if test -z "$watcher_pid"; then
+        return
+    fi
+    /bin/kill -TERM "$watcher_pid" 2>/dev/null || true
+    watcher_pid=
+}}
 cleanup() {{
     terminate_child
-    if test -n "$watcher_pid"; then
-        /bin/kill -TERM "$watcher_pid" 2>/dev/null || true
-        wait "$watcher_pid" 2>/dev/null || true
-    fi
+    stop_watcher
     if test -n "$payload_pipe"; then
         rm -f -- "$payload_pipe"
+    fi
+    if test -n "$watcher_gate"; then
+        rm -f -- "$watcher_gate"
+    fi
+    if test -n "$watcher_pid_pipe"; then
+        rm -f -- "$watcher_pid_pipe"
     fi
     if test -n "$runtime_dir"; then
         rmdir -- "$runtime_dir" 2>/dev/null || true
@@ -89,7 +130,9 @@ if test "$runtime_status" -ne 0; then
     exit 72
 fi
 payload_pipe=$runtime_dir/payload
-mkfifo -m 600 "$payload_pipe" || exit 73
+watcher_gate=$runtime_dir/watcher-gate
+watcher_pid_pipe=$runtime_dir/watcher-pid
+mkfifo -m 600 "$payload_pipe" "$watcher_gate" "$watcher_pid_pipe" || exit 73
 exec 3<&0
 # A temporary read-write guard lets the supervisor open separate read-only and
 # write-only ends without blocking. The child inherits only the read end, so it
@@ -99,34 +142,32 @@ exec 5< "$payload_pipe" || exit 73
 exec 6> "$payload_pipe" || exit 73
 exec 4>&-
 startup_critical=1
-setsid {remote_program} <&5 5<&- 6>&- &
+setsid /bin/sh -c {shlex.quote(child_runner)} remote-ssh-mcp-child \
+    "$payload_pipe" "$watcher_gate" "$watcher_pid_pipe" "$runtime_dir" \
+    {remote_program} \
+    <&5 5<&- 6>&- &
 child_pid=$!
 startup_critical=0
 if test "$interruption_pending" = 1; then
     exit 255
 fi
 exec 5<&-
+# The child runner creates a detached watcher and then execs the remote shell.
+# The outer supervisor therefore owns one waitable child only, avoiding dash
+# SIGCHLD races. A private FIFO transfers the watcher PID before the payload is
+# released; the gate keeps that watcher from competing with dd for input.
+IFS= read -r watcher_pid < "$watcher_pid_pipe" || exit 76
+case "$watcher_pid" in
+    ''|*[!0-9]*) exit 76 ;;
+esac
+rm -f -- "$watcher_pid_pipe"
 dd iflag=fullblock bs=1 count="$payload_size" status=none >&6 || exit 74
 exec 6>&-
-setsid /bin/sh -c '
-    child_pid=$1
-    payload_pipe=$2
-    runtime_dir=$3
-    IFS= read -r unexpected || true
-    /bin/kill -TERM -- "-$child_pid" 2>/dev/null || true
-    sleep 1
-    /bin/kill -KILL -- "-$child_pid" 2>/dev/null || true
-    rm -f -- "$payload_pipe"
-    rmdir -- "$runtime_dir" 2>/dev/null || true
-' remote-ssh-mcp-watcher "$child_pid" "$payload_pipe" "$runtime_dir" \
-    <&3 >/dev/null 2>&1 &
-watcher_pid=$!
+printf 'armed\n' > "$watcher_gate" || exit 75
 wait "$child_pid"
 status=$?
-/bin/kill -TERM "$watcher_pid" 2>/dev/null || true
-wait "$watcher_pid" 2>/dev/null || true
-watcher_pid=
 child_pid=
+stop_watcher
 exit "$status"
 """
     return shlex.join(("/bin/sh", "-c", supervisor))

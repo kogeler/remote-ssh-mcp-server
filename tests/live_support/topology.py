@@ -56,7 +56,7 @@ def create_internal_network(resources: LiveResources) -> str:
     return name
 
 
-def wait_for_sshd(resources: LiveResources, target: str) -> None:
+def wait_for_sshd(resources: LiveResources, target: str, port: int) -> None:
     for _attempt in range(90):
         completed = run_process(
             [
@@ -65,7 +65,7 @@ def wait_for_sshd(resources: LiveResources, target: str) -> None:
                 target,
                 "ss",
                 "-Hltn",
-                "sport = :22",
+                f"sport = :{port}",
             ],
             text=True,
             capture_output=True,
@@ -78,7 +78,7 @@ def wait_for_sshd(resources: LiveResources, target: str) -> None:
 
 
 def verify_target_confinement(
-    resources: LiveResources, target: str, network: str | None
+    resources: LiveResources, target: str, network: str | None, ssh_port: int
 ) -> None:
     capability_text = (
         podman_exec(
@@ -137,7 +137,7 @@ def verify_target_confinement(
 
     if network is not None:
         published = run_process(
-            [resources.podman, "port", target, "22/tcp"],
+            [resources.podman, "port", target, f"{ssh_port}/tcp"],
             text=True,
             capture_output=True,
             check=False,
@@ -163,10 +163,11 @@ def provision_target(
     public_key: Path,
     public_digest: str,
     network: str | None,
+    ssh_port: int,
 ) -> str:
     name = unique_name("remote-ssh-mcp-e2e")
     resources.target_name = name
-    network_options = ["--publish", "127.0.0.1::22"]
+    network_options = ["--publish", f"127.0.0.1::{ssh_port}"]
     if network is not None:
         network_options = ["--network", network, "--network-alias", "live-target"]
     print("live: creating the disposable test container", file=sys.stderr)
@@ -188,33 +189,21 @@ def provision_target(
         ],
         "creating the target container",
     )
-    checked(
-        [
-            resources.podman,
-            "cp",
-            str(public_key),
-            f"{name}:/home/mcp-test/.ssh/authorized_keys",
-        ],
-        "installing the target public key",
-    )
     checked([resources.podman, "start", name], "starting the target container")
-    wait_for_sshd(resources, name)
     podman_exec(
         resources,
         name,
-        "chown",
-        "mcp-test:mcp-test",
-        "/home/mcp-test/.ssh/authorized_keys",
-        purpose="setting target key ownership",
+        "sh",
+        "-ceu",
+        (
+            "umask 077; cat > /home/mcp-test/.ssh/authorized_keys; "
+            "chown mcp-test:mcp-test /home/mcp-test/.ssh/authorized_keys; "
+            "chmod 0600 /home/mcp-test/.ssh/authorized_keys"
+        ),
+        purpose="streaming the target public key",
+        input_data=public_key.read_bytes(),
     )
-    podman_exec(
-        resources,
-        name,
-        "chmod",
-        "0600",
-        "/home/mcp-test/.ssh/authorized_keys",
-        purpose="setting target key permissions",
-    )
+    wait_for_sshd(resources, name, ssh_port)
     guest_digest = (
         podman_exec(
             resources,
@@ -242,25 +231,11 @@ def provision_target(
     )
     if groups != "mcp-test":
         raise LiveFailure("test account has unexpected group access")
-    verify_target_confinement(resources, name, network)
+    verify_target_confinement(resources, name, network, ssh_port)
     return name
 
 
 def provision_target_fixtures(resources: LiveResources, target: str) -> None:
-    password_script = (
-        "set -euo pipefail; umask 077; "
-        "password=$(head -c 48 /dev/urandom | base64 -w0); "
-        'printf "%s" "$password" > /run/remote-ssh-mcp-e2e.password; '
-        'printf "mcp-test:%s\\n" "$password" | chpasswd; unset password'
-    )
-    podman_exec(
-        resources,
-        target,
-        "bash",
-        "-c",
-        password_script,
-        purpose="preparing the target password fixture",
-    )
     sudo_script = (
         "set -e; umask 022; "
         'printf "%s\\n" '
