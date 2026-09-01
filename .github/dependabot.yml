@@ -15,8 +15,6 @@ updates:
       python:
         patterns:
           - "*"
-    ignore:
-      - dependency-name: pydantic-core
 
   - package-ecosystem: github-actions
     directory: /

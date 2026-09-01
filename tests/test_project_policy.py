@@ -287,10 +287,28 @@ def test_governance_files_are_repository_local() -> None:
         .read_text(encoding="utf-8")
         .endswith("* @kogeler\n")
     )
-    dependabot = (ROOT / ".github/dependabot.yml").read_text(encoding="utf-8")
-    assert "package-ecosystem: pip" in dependabot
-    assert "package-ecosystem: github-actions" in dependabot
-    assert "directory: /" in dependabot
+    dependabot = yaml.load(
+        (ROOT / ".github/dependabot.yml").read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,
+    )
+    assert isinstance(dependabot, dict)
+    updates = dependabot.get("updates")
+    assert isinstance(updates, list)
+    ecosystems = {
+        update["package-ecosystem"]: update
+        for update in updates
+        if isinstance(update, dict) and "package-ecosystem" in update
+    }
+    assert set(ecosystems) == {"pip", "github-actions"}
+    for update in ecosystems.values():
+        assert update.get("directory") == "/"
+    python_updates = ecosystems["pip"]
+    groups = python_updates.get("groups")
+    assert isinstance(groups, dict) and len(groups) == 1
+    group = next(iter(groups.values()))
+    assert isinstance(group, dict)
+    assert group.get("patterns") == ["*"]
+    assert "ignore" not in python_updates
     assert (ROOT / ".github/dependency-audit-exceptions.json").is_file()
     assert (ROOT / ".github/dependency-review-config.yml").is_file()
     ignored = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
@@ -317,6 +335,12 @@ def test_ci_checkouts_never_replace_the_published_dependency() -> None:
 def test_release_publishes_only_the_two_gated_executables_and_checksums() -> None:
     """Release reuses CI bytes and verifies a closed standalone inventory."""
     workflow = _workflow_document("release.yml")
+    triggers = workflow.get("on")
+    assert isinstance(triggers, dict)
+    push = triggers.get("push")
+    assert isinstance(push, dict)
+    assert push.get("branches") == ["main"]
+    assert push.get("paths") == [".version"]
     jobs = workflow.get("jobs")
     assert isinstance(jobs, dict)
 
