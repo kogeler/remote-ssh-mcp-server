@@ -15,7 +15,7 @@ def test_help_exits_without_required_arguments(
 
     assert raised.value.code == 0
     output = capsys.readouterr().out
-    assert "--local-root" in output
+    assert "--connect-timeout" in output
     assert "--target" not in output
 
 
@@ -27,10 +27,9 @@ def test_version(capsys: pytest.CaptureFixture[str]) -> None:
     assert __version__ in capsys.readouterr().out
 
 
-def test_parser_preserves_local_root_without_target() -> None:
-    args = build_parser().parse_args(["--local-root", "/tmp/work tree"])
+def test_parser_has_no_startup_target() -> None:
+    args = build_parser().parse_args([])
 
-    assert args.local_root == "/tmp/work tree"
     assert not hasattr(args, "target")
 
 

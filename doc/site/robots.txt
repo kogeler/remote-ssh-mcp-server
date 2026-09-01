@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://kogeler.github.io/remote-ssh-mcp-server/sitemap.xml

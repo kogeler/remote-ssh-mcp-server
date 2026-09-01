@@ -30,7 +30,7 @@ LocalPath = Annotated[
         min_length=1,
         max_length=16_384,
         pattern=r"^[^\x00]+$",
-        description="Relative path below the configured local root",
+        description="Path relative to the server's local root",
     ),
 ]
 OperationId = Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")]

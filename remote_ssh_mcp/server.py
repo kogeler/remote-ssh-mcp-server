@@ -1,4 +1,4 @@
-"""Bounded MCP STDIO interface for the remote SSH core."""
+"""Bounded MCP STDIO interface for the Remote SSH server."""
 
 from __future__ import annotations
 
@@ -62,14 +62,15 @@ from .transfers import TransferManager
 
 SERVER_INSTRUCTIONS = (
     "This server starts disconnected. Call connect deliberately with either one "
-    "ssh_alias or one host/user/port tuple; the call may open the normal system SSH "
+    "ssh_alias or one host/user pair with an optional port; the call may open the "
+    "normal system SSH "
     "authentication UI. At most one authenticated OpenSSH master exists at a time, "
     "and changing targets requires disconnect first. Never request or pass a password, "
     "PIN, private key, sudo secret, SSH option, or absolute local path. There is no "
     "automatic reconnect after connection_lost; only another explicit connect may "
     "authenticate. exec, sudo_exec, uploads, downloads, cancellation, disconnect, and "
     "overwrite operations can change state and require deliberate approval. Local paths "
-    "are relative to the configured root. Commands are isolated non-PTY shells; cwd and "
+    "are relative to the server's local root. Commands are isolated non-PTY shells; cwd and "
     "environment changes do not persist. Output is bounded and may be truncated or "
     "explicitly spooled. Large files use background rsync: start a transfer, poll "
     "transfer_status, and cancel only when required. sudo_exec succeeds only for "
@@ -108,7 +109,7 @@ class RemoteSSHApplication:
 
     def __init__(self, config: RuntimeConfig) -> None:
         self.config = config
-        self.paths = LocalPathPolicy(config.local_root)
+        self.paths = LocalPathPolicy(config.repository_root)
         self.master: OpenSSHMaster | None = None
         self.runner: CommandRunner | None = None
         self.inspector: RemoteInspector | None = None
@@ -224,7 +225,7 @@ class RemoteSSHApplication:
 
     def public_transfer(self, value: dict[str, Any]) -> TransferData:
         sanitized = dict(value)
-        replacements = [(str(self.config.local_root), "<local-root>")]
+        replacements = [(str(self.config.repository_root), "<repository>")]
         if self.master is not None and self.master.runtime_dir is not None:
             replacements.append((str(self.master.runtime_dir), "<runtime-dir>"))
         if self.master is not None and self.master.control_path is not None:
@@ -422,7 +423,7 @@ async def _transfer_list(
 TOOL_DEFINITIONS = (
     ToolDefinition(
         "connect",
-        "Open one SSH master using either an SSH config alias or host/user/port.",
+        "Open one SSH master using an alias or host/user with an optional port.",
         ConnectInput,
         ConnectionResponse,
         CONNECTING,
@@ -430,7 +431,7 @@ TOOL_DEFINITIONS = (
     ),
     ToolDefinition(
         "disconnect",
-        "Cancel active transfers and explicitly close the owned SSH master.",
+        "Cancel active commands and transfers, then close the owned SSH master.",
         EmptyInput,
         ConnectionResponse,
         CANCELLING,
@@ -438,7 +439,7 @@ TOOL_DEFINITIONS = (
     ),
     ToolDefinition(
         "connection_status",
-        "Report disconnected, ready, or lost state without opening a connection.",
+        "Report disconnected, starting, ready, or lost without opening a connection.",
         EmptyInput,
         ConnectionResponse,
         READ_ONLY,
@@ -486,7 +487,7 @@ TOOL_DEFINITIONS = (
     ),
     ToolDefinition(
         "download_start",
-        "Start a verified background rsync download into the local root.",
+        "Start a verified background rsync download into the server's local root.",
         DownloadStartInput,
         TransferResponse,
         MUTATING,

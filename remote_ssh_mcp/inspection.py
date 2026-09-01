@@ -64,6 +64,11 @@ class RemoteInspector:
 
     async def list_directory(self, remote_path: str) -> dict[str, Any]:
         path = _remote_path(remote_path)
+        metadata = await self.stat(path)
+        if metadata["type"] != "directory":
+            raise RemoteMCPError(
+                "invalid_remote_type", "remote listing source is not a directory"
+            )
         format_string = "%f\\0%y\\0%s\\0%T@\\0"
         command = (
             f"find -- {shlex.quote(path)} -mindepth 1 -maxdepth 1 "
@@ -118,15 +123,24 @@ class RemoteInspector:
                 "invalid_range",
                 f"max_bytes must be between 1 and {self.runner.config.max_output_bytes}",
             )
-        command = f"dd if={shlex.quote(path)} bs=1 skip={offset} count={max_bytes} status=none"
+        metadata = await self.stat(path)
+        if metadata["type"] != "regular file":
+            raise RemoteMCPError(
+                "invalid_remote_type", "remote range source is not a regular file"
+            )
+        command = (
+            f"dd if={shlex.quote(path)} bs=1 skip={offset} "
+            f"count={max_bytes + 1} status=none"
+        )
         result = await self.runner.run_script(command)
         if result.exit_code != 0:
             self._raise_command_error(path, result.stderr.text())
-        encoded = _encoded_bytes(result.stdout.raw)
+        data = result.stdout.raw[:max_bytes]
+        encoded = _encoded_bytes(data)
         return {
             "path": path,
             "offset": offset,
-            "bytes_read": len(result.stdout.raw),
-            "eof": len(result.stdout.raw) < max_bytes,
+            "bytes_read": len(data),
+            "eof": result.stdout.total_bytes <= max_bytes,
             **encoded,
         }

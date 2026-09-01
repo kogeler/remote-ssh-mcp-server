@@ -56,7 +56,7 @@ def sudo_stack(
     fake = tmp_path / "fake-sudo"
     fake.write_text(FAKE_SUDO.format(python=sys.executable), encoding="utf-8")
     fake.chmod(0o755)
-    paths = LocalPathPolicy(runtime_config.local_root)
+    paths = LocalPathPolicy(runtime_config.repository_root)
     paths.initialize()
     runner = CommandRunner(runtime_config, LocalShellMaster(), paths)  # type: ignore[arg-type]
     remote_program = shlex.join(
@@ -176,6 +176,6 @@ async def test_sudo_spool_does_not_contain_internal_marker(
     result = await sudo.execute("head -c 70000 /dev/zero >&2", spool_output=True)
 
     assert result.stderr.spool_path is not None
-    spool = sudo.runner.paths.root / result.stderr.spool_path
+    spool = sudo.runner.paths.repository / result.stderr.spool_path
     assert spool.read_bytes() == b"\x00" * 70000
     assert result.stderr.total_bytes == 70000

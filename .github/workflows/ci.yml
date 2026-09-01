@@ -1,12 +1,20 @@
 name: CI
 
 on:
-  push:
-    branches:
-      - main
   pull_request:
     branches:
       - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      upload_release_artifacts:
+        description: Preserve the verified standalone release candidates.
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -20,217 +28,127 @@ env:
 
 jobs:
   quality:
-    name: Lint, test, and audit
+    name: Tests, linters, and Python compatibility
     runs-on: ubuntu-26.04
-    timeout-minutes: 20
-    permissions:
-      contents: read
-      pull-requests: write
+    timeout-minutes: 30
     steps:
       - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
-      # Ruff is the only host tool. Pin Python for its isolated venv; every
-      # check that needs the project environment still runs in the toolbox.
-      - name: Set up Python for Ruff
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
-          python-version: "3.13"
+          python-version: "3.14"
           cache: pip
-          cache-dependency-path: requirements-lint.txt
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+            requirements-docs.txt
+            requirements-lint.txt
 
-      - name: Resolve the image cache key
-        id: images
-        run: make image-key >> "$GITHUB_OUTPUT"
-
-      - name: Restore the toolbox image
-        id: toolbox-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .artifacts/images/toolbox.tar
-          key: podman-${{ runner.os }}-${{ runner.arch }}-toolbox-${{ steps.images.outputs.toolbox }}
-
-      - name: Restore the resolver image
-        id: resolver-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .artifacts/images/resolver.tar
-          key: podman-${{ runner.os }}-${{ runner.arch }}-resolver-${{ steps.images.outputs.resolver }}
-
-      - name: Load the cached toolbox image
-        if: steps.toolbox-cache.outputs.cache-hit == 'true'
-        run: make image-load-toolbox
-
-      - name: Load the cached resolver image
-        if: steps.resolver-cache.outputs.cache-hit == 'true'
-        run: make image-load-resolver
-
-      - name: Run local CI matrix
-        env:
-          RUFF_OUTPUT_FORMAT: github
+      - name: Run complete project contract
         run: make ci
 
-      - name: Export the toolbox image for caching
-        if: steps.toolbox-cache.outputs.cache-hit != 'true'
-        run: make image-save-toolbox
-
-      - name: Export the resolver image for caching
-        if: steps.resolver-cache.outputs.cache-hit != 'true'
-        run: make image-save-resolver
-
-      - name: Publish the coverage report
-        if: ${{ !cancelled() }}
-        env:
-          REPORT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          set -o pipefail
-          if [[ ! -f .artifacts/coverage-total.txt ]]; then
-            printf '%s\n' 'Coverage data was not produced by this run.' \
-              >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          {
-            make coverage-report
-            printf '\n<sub>Commit %s · reproduce with: make test && make coverage-report</sub>\n' \
-              "${REPORT_SHA:0:7}"
-          } | tee .artifacts/pr-coverage.md >> "$GITHUB_STEP_SUMMARY"
-
-      # Fork pull requests receive a read-only token whatever this job requests,
-      # so a rejected comment must never mask the real quality-gate result.
-      - name: Comment the coverage report on the pull request
-        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          if [[ -f .artifacts/pr-coverage.md ]]; then
-            .github/scripts/pr-comment.sh coverage .artifacts/pr-coverage.md
-          fi
+  standalone:
+    name: Linux ${{ matrix.architecture }} standalone
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-26.04
+          - architecture: arm64
+            runner: ubuntu-26.04-arm
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Set up Python 3.14
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements-standalone.txt
+      - name: Build and smoke the native executable
+        run: >-
+          make standalone smoke-standalone SYSTEM_PYTHON=python
+          STANDALONE_ARCH=${{ matrix.architecture }}
+      - name: Preserve exact standalone release candidate
+        if: inputs.upload_release_artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: standalone-${{ matrix.architecture }}
+          path: dist/remote-ssh-mcp-linux-${{ matrix.architecture }}
+          if-no-files-found: error
+          retention-days: 1
 
   dependency-review:
     name: Dependency review
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-26.04
     timeout-minutes: 10
-    permissions:
-      contents: read
-      pull-requests: write
     steps:
       - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-
       - name: Review dependency changes
-        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294
         with:
-          fail-on-severity: moderate
-          fail-on-scopes: runtime, development, unknown
-          # The action downgrades an unwritable pull request to a warning, so
-          # this never turns a clean dependency result into a failed check.
-          comment-summary-in-pr: always
+          config-file: ./.github/dependency-review-config.yml
 
   codeql:
-    name: CodeQL
+    name: CodeQL (${{ matrix.language }})
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
       contents: read
-      packages: read
       security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language:
+          - actions
+          - python
     steps:
       - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd
         with:
-          languages: python
+          languages: ${{ matrix.language }}
           queries: security-extended
+      - name: Analyze
+        uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd
 
-      - name: Analyze Python
-        uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
-        with:
-          category: /language:python
-
-  live-podman:
+  live:
     name: Live Podman
     needs: quality
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-
-      - name: Resolve the image cache key
-        id: images
-        run: make image-key >> "$GITHUB_OUTPUT"
-
-      - name: Restore the toolbox image
-        id: toolbox-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .artifacts/images/toolbox.tar
-          key: podman-${{ runner.os }}-${{ runner.arch }}-toolbox-${{ steps.images.outputs.toolbox }}
-
-      - name: Restore the live-target image
-        id: target-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .artifacts/images/live-target.tar
-          key: podman-${{ runner.os }}-${{ runner.arch }}-target-${{ steps.images.outputs.target }}
-
-      - name: Load the cached toolbox image
-        if: steps.toolbox-cache.outputs.cache-hit == 'true'
-        run: make image-load-toolbox
-
-      - name: Load the cached live-target image
-        if: steps.target-cache.outputs.cache-hit == 'true'
-        run: make image-load-target
-
       - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
-          python-version: "3.13"
+          python-version: "3.14"
           cache: pip
-          cache-dependency-path: |
-            requirements.txt
-
-      - name: Install test host dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes rsync
-
-      # Rootless is what makes the target's root harmless on the host, so the
-      # job refuses to continue without it rather than silently testing a
-      # weaker isolation than the one this repository documents.
+          cache-dependency-path: requirements.txt
       - name: Verify rootless Podman
-        run: |
-          podman version
-          rootless="$(podman info --format '{{.Host.Security.Rootless}}')"
-          printf 'rootless=%s\n' "$rootless"
-          if [[ "$rootless" != true ]]; then
-            printf '%s\n' 'rootless Podman is required for the live test' >&2
-            exit 1
-          fi
-
-      - name: Install runtime dependencies explicitly
+        run: make doctor
+      - name: Install runtime explicitly
         run: make runtime-venv
-
-      - name: Run automatic live test
+      - name: Exercise the real isolated launcher
+        run: make host-tests
+      - name: Run automatic MCP live matrix
         run: make live-test
-
-      - name: Export the toolbox image for caching
-        if: steps.toolbox-cache.outputs.cache-hit != 'true'
-        run: make image-save-toolbox
-
-      - name: Export the live-target image for caching
-        if: steps.target-cache.outputs.cache-hit != 'true'
-        run: make image-save-target

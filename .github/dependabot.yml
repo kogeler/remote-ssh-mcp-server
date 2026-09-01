@@ -1,19 +1,20 @@
+# Copyright (c) 2026 kogeler
+# SPDX-License-Identifier: MIT
+
 version: 2
 updates:
-  # The manifests own direct versions and pip-compile owns the generated locks.
-  # Group ordinary updates so one resolver change produces one coherent PR.
   - package-ecosystem: pip
     directory: /
     schedule:
       interval: weekly
+      day: monday
+      time: "05:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
     groups:
-      python-dependencies:
+      python:
         patterns:
           - "*"
-    # Pydantic pins an exact pydantic-core build. Dependabot treats the
-    # transitive pip-compile lock entry as direct and otherwise repeatedly opens
-    # an uninstallable core-only update. Core moves through a pydantic update or
-    # an intentional `make refresh-dependencies`, never independently.
     ignore:
       - dependency-name: pydantic-core
 
@@ -21,6 +22,10 @@ updates:
     directory: /
     schedule:
       interval: weekly
+      day: monday
+      time: "05:10"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
     groups:
       github-actions:
         patterns:

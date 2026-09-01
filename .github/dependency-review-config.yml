@@ -1,0 +1,38 @@
+# Copyright (c) 2026 kogeler. SPDX-License-Identifier: MIT.
+
+fail-on-severity: moderate
+fail-on-scopes:
+  - runtime
+  - development
+  - unknown
+vulnerability-check: true
+license-check: true
+comment-summary-in-pr: never
+
+# Project-wide approved SPDX identifiers. GPL-family licenses do not belong
+# here; packages needing a reviewed exception are scoped below by exact package
+# URL and version.
+allow-licenses:
+  - 0BSD
+  - Apache-2.0
+  - BSD-2-Clause
+  - BSD-3-Clause
+  - HPND-Markus-Kuhn
+  - ISC
+  - MIT
+  - MIT-0
+  - MPL-2.0
+  - PSF-2.0
+  - Python-2.0
+  - Unlicense
+
+allow-dependencies-licenses:
+  # PyInstaller's GPL bootloader has the upstream exception that explicitly
+  # permits distributing programs built with PyInstaller.
+  - pkg:pypi/pyinstaller
+  # The hook collection aggregates licenses for hook code targeting third-party
+  # packages. It is development-only; its version comes only from the locks.
+  - pkg:pypi/pyinstaller-hooks-contrib
+  # GitHub aggregates CPython and bundled test-data licenses for this wheel,
+  # while its package metadata declares PSF-2.0.
+  - pkg:pypi/typing-extensions

@@ -450,7 +450,7 @@ class TransferManager:
             if free_bytes < required_bytes:
                 raise RemoteMCPError(
                     "insufficient_local_space",
-                    "local root does not have enough free space for the download",
+                    "local filesystem does not have enough free space for the download",
                     {"required_bytes": required_bytes, "free_bytes": free_bytes},
                 )
 

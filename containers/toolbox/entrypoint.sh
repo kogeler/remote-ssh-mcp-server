@@ -49,8 +49,9 @@ chmod 0700 "$HOME"
 }
 mkdir -p /work/src /work/out
 chmod 0700 /work/src /work/out
-tar --extract --file=- --directory=/work/src
-cd /work/src
+rmdir /work/src
+/usr/local/libexec/container-payload extract --destination /work/src
+cd /work/src/remote_ssh_mcp
 
 if [[ -z "${BOX_EXPORT:-}" ]]; then
     exec "$@"
@@ -60,14 +61,19 @@ status=0
 "$@" >&2 || status=$?
 
 if (( status != 0 )) && [[ "${BOX_EXPORT_ON_SUCCESS:-0}" == 1 ]]; then
+    /usr/local/libexec/container-payload create \
+        --root=/work/src/remote_ssh_mcp --allow-empty
     exit "$status"
 fi
 
 exported=()
 for path in ${BOX_EXPORT}; do
-    if [[ -e "$path" ]]; then exported+=("$path"); fi
+    [[ -f "$path" && ! -L "$path" ]] || {
+        printf 'toolbox: expected export is not a regular file: %s\n' "$path" >&2
+        exit 1
+    }
+    exported+=("$path")
 done
-if (( ${#exported[@]} )); then
-    tar --create --file=- --directory=/work/src -- "${exported[@]}"
-fi
+/usr/local/libexec/container-payload create \
+    --root=/work/src/remote_ssh_mcp -- "${exported[@]}"
 exit "$status"

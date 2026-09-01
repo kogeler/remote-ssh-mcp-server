@@ -1,0 +1,411 @@
+# Copyright (c) 2026 kogeler. SPDX-License-Identifier: MIT.
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  release-state:
+    name: Release state
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    outputs:
+      release_required: ${{ steps.check.outputs.release_required }}
+    steps:
+      - name: Check exact release state
+        id: check
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          EXPECTED_REPOSITORY: kogeler/remote-ssh-mcp-server
+        with:
+          script: |
+            const crypto = await import("node:crypto");
+            const repository = `${context.repo.owner}/${context.repo.repo}`;
+            if (repository !== process.env.EXPECTED_REPOSITORY) {
+              throw new Error(`Refusing to inspect unexpected repository ${repository}`);
+            }
+
+            const readFile = async (path) => {
+              const response = await github.rest.repos.getContent({
+                ...context.repo,
+                path,
+                ref: context.sha,
+              });
+              if (
+                Array.isArray(response.data) ||
+                response.data.type !== "file" ||
+                response.data.encoding !== "base64"
+              ) {
+                throw new Error(`${path} is not a base64-encoded repository file`);
+              }
+              return Buffer.from(
+                response.data.content.replace(/\n/g, ""),
+                "base64",
+              ).toString("utf8");
+            };
+
+            const version = (await readFile(".version")).trim();
+            if (!/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(version)) {
+              throw new Error(".version is not a stable semantic version");
+            }
+
+            const changelog = await readFile("CHANGELOG.md");
+            const escapedVersion = version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            const heading = new RegExp(
+              `^## ${escapedVersion} - [0-9]{4}-[0-9]{2}-[0-9]{2}$`,
+              "gm",
+            );
+            const matches = [...changelog.matchAll(heading)];
+            if (matches.length !== 1) {
+              throw new Error(`CHANGELOG.md does not have one exact ${version} section`);
+            }
+            const start = matches[0].index + matches[0][0].length;
+            const remaining = changelog.slice(start);
+            const nextHeading = remaining.search(/^## /m);
+            const body = remaining.slice(0, nextHeading < 0 ? undefined : nextHeading).trim();
+            if (!body || !/^- /m.test(body)) {
+              throw new Error(`CHANGELOG.md section ${version} has no release entries`);
+            }
+            const expectedBody = `${body}\n\nFull changelog: ` +
+              `https://github.com/${repository}/blob/${version}/CHANGELOG.md\n`;
+            const expectedAssets = new Set([
+              "remote-ssh-mcp-linux-amd64",
+              "remote-ssh-mcp-linux-arm64",
+              "SHA256SUMS.txt",
+            ]);
+
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              ...context.repo,
+              per_page: 100,
+            });
+            const matchesForTag = releases.filter((item) => item.tag_name === version);
+            if (matchesForTag.length > 1) {
+              throw new Error(`Multiple releases use ${version}`);
+            }
+            const existing = matchesForTag[0] || null;
+            let tag = null;
+            try {
+              tag = await github.rest.git.getRef({
+                ...context.repo,
+                ref: `tags/${version}`,
+              });
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            if (!existing) {
+              if (tag) {
+                throw new Error(`Tag ${version} exists without a recoverable release`);
+              }
+              core.notice(`No release exists for ${version}; running release gates`);
+              core.setOutput("release_required", "true");
+              return;
+            }
+            if (
+              existing.tag_name !== version || existing.name !== version ||
+              existing.body !== expectedBody || existing.target_commitish !== context.sha ||
+              existing.prerelease
+            ) {
+              throw new Error(`Existing release ${version} metadata is not exact`);
+            }
+            if (
+              tag && (
+                tag.data.ref !== `refs/tags/${version}` ||
+                tag.data.object.type !== "commit" ||
+                tag.data.object.sha !== context.sha
+              )
+            ) {
+              throw new Error(`Published release ${version} has a conflicting tag or target`);
+            }
+            if (existing.draft) {
+              core.notice(`Recovering exact draft release ${version}`);
+              core.setOutput("release_required", "true");
+              return;
+            }
+            if (!tag) {
+              throw new Error(`Published release ${version} has no matching Git tag`);
+            }
+
+            const assets = await github.paginate(github.rest.repos.listReleaseAssets, {
+              ...context.repo,
+              release_id: existing.id,
+              per_page: 100,
+            });
+            if (assets.length !== expectedAssets.size) {
+              throw new Error(`Published release ${version} has an incomplete asset inventory`);
+            }
+            const downloaded = new Map();
+            for (const asset of assets) {
+              if (
+                !expectedAssets.has(asset.name) || downloaded.has(asset.name) ||
+                asset.state !== "uploaded" || !Number.isInteger(asset.size) ||
+                asset.size <= 0
+              ) {
+                throw new Error(`Published release has invalid asset ${asset.name}`);
+              }
+              const response = await github.request(
+                "GET /repos/{owner}/{repo}/releases/assets/{asset_id}",
+                {
+                  ...context.repo,
+                  asset_id: asset.id,
+                  headers: { accept: "application/octet-stream" },
+                },
+              );
+              const data = Buffer.from(response.data);
+              if (data.byteLength !== asset.size) {
+                throw new Error(`Published asset size changed for ${asset.name}`);
+              }
+              downloaded.set(asset.name, {
+                data,
+                sha256: crypto.createHash("sha256").update(data).digest("hex"),
+              });
+            }
+            const checksum = downloaded.get("SHA256SUMS.txt").data.toString("ascii");
+            const expectedChecksum = [...expectedAssets]
+              .filter((name) => name !== "SHA256SUMS.txt")
+              .sort()
+              .map((name) => `${downloaded.get(name).sha256}  ${name}\n`)
+              .join("");
+            if (checksum !== expectedChecksum) {
+              throw new Error(`Published release ${version} has conflicting checksums`);
+            }
+
+            core.notice(`Release ${existing.html_url} already matches this commit`);
+            core.setOutput("release_required", "false");
+
+  ci:
+    name: CI gate
+    needs: release-state
+    if: needs.release-state.outputs.release_required == 'true'
+    uses: ./.github/workflows/ci.yml
+    with:
+      upload_release_artifacts: true
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+  publish:
+    name: Publish release
+    needs:
+      - release-state
+      - ci
+    if: needs.release-state.outputs.release_required == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Check out release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Download amd64 executable
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: standalone-amd64
+          path: dist
+
+      - name: Download arm64 executable
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: standalone-arm64
+          path: dist
+
+      - name: Generate and verify exact release metadata
+        run: make checksums release-notes
+
+      - name: Publish exact-version release and verified executables
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          EXPECTED_REPOSITORY: kogeler/remote-ssh-mcp-server
+          RELEASE_NOTES_PATH: .artifacts/release-notes.md
+          TARGET_SHA: ${{ github.sha }}
+          VERSION_PATH: .version
+        with:
+          script: |
+            const crypto = await import("node:crypto");
+            const fs = await import("node:fs/promises");
+            const path = await import("node:path");
+            const repository = `${context.repo.owner}/${context.repo.repo}`;
+            if (repository !== process.env.EXPECTED_REPOSITORY) {
+              throw new Error(`Refusing to publish unexpected repository ${repository}`);
+            }
+            const version = (await fs.readFile(process.env.VERSION_PATH, "utf8")).trim();
+            const body = await fs.readFile(process.env.RELEASE_NOTES_PATH, "utf8");
+            const target = process.env.TARGET_SHA;
+            if (!/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(version)) {
+              throw new Error(".version is not a stable semantic version");
+            }
+            if (!body.trim()) {
+              throw new Error("release notes are empty");
+            }
+
+            const assetPaths = [
+              "dist/remote-ssh-mcp-linux-amd64",
+              "dist/remote-ssh-mcp-linux-arm64",
+              "dist/SHA256SUMS.txt",
+            ];
+            const local = new Map();
+            for (const assetPath of assetPaths) {
+              const data = await fs.readFile(assetPath);
+              const name = path.basename(assetPath);
+              if (!data.byteLength) {
+                throw new Error(`Release asset is empty: ${name}`);
+              }
+              local.set(name, {
+                data,
+                size: data.byteLength,
+                sha256: crypto.createHash("sha256").update(data).digest("hex"),
+              });
+            }
+
+            let tag = null;
+            try {
+              tag = await github.rest.git.getRef({
+                ...context.repo,
+                ref: `tags/${version}`,
+              });
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            if (
+              tag &&
+              (tag.data.object.type !== "commit" || tag.data.object.sha !== target)
+            ) {
+              throw new Error(`Tag ${version} already points to another object`);
+            }
+
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              ...context.repo,
+              per_page: 100,
+            });
+            const matches = releases.filter((item) => item.tag_name === version);
+            if (matches.length > 1) {
+              throw new Error(`Multiple releases use ${version}`);
+            }
+            let release = matches[0] || null;
+            if (!release && tag) {
+              throw new Error(`Tag ${version} exists without a recoverable draft`);
+            }
+            if (release) {
+              if (
+                !release.draft || release.name !== version || release.body !== body ||
+                release.target_commitish !== target || release.prerelease
+              ) {
+                throw new Error(`Existing release ${version} is not an exact draft`);
+              }
+            } else {
+              const created = await github.rest.repos.createRelease({
+                ...context.repo,
+                tag_name: version,
+                target_commitish: target,
+                name: version,
+                body,
+                draft: true,
+                prerelease: false,
+              });
+              release = created.data;
+            }
+
+            const assets = await github.paginate(github.rest.repos.listReleaseAssets, {
+              ...context.repo,
+              release_id: release.id,
+              per_page: 100,
+            });
+            const existing = new Set();
+            for (const asset of assets) {
+              const expected = local.get(asset.name);
+              if (!expected || existing.has(asset.name) || asset.state !== "uploaded") {
+                throw new Error(`Unexpected or duplicate draft asset ${asset.name}`);
+              }
+              const response = await github.request(
+                "GET /repos/{owner}/{repo}/releases/assets/{asset_id}",
+                {
+                  ...context.repo,
+                  asset_id: asset.id,
+                  headers: { accept: "application/octet-stream" },
+                },
+              );
+              const data = Buffer.from(response.data);
+              const digest = crypto.createHash("sha256").update(data).digest("hex");
+              if (data.byteLength !== expected.size || digest !== expected.sha256) {
+                throw new Error(`Draft asset ${asset.name} conflicts with gated bytes`);
+              }
+              existing.add(asset.name);
+            }
+            for (const [name, expected] of local) {
+              if (existing.has(name)) continue;
+              const uploaded = await github.rest.repos.uploadReleaseAsset({
+                ...context.repo,
+                release_id: release.id,
+                name,
+                data: expected.data,
+                headers: {
+                  "content-type": "application/octet-stream",
+                  "content-length": expected.size,
+                },
+              });
+              if (
+                uploaded.status !== 201 || uploaded.data.name !== name ||
+                uploaded.data.state !== "uploaded" || uploaded.data.size !== expected.size
+              ) {
+                throw new Error(`Release upload was not verified: ${name}`);
+              }
+            }
+
+            const finalAssets = await github.paginate(
+              github.rest.repos.listReleaseAssets,
+              {...context.repo, release_id: release.id, per_page: 100},
+            );
+            if (finalAssets.length !== local.size) {
+              throw new Error("Final draft asset inventory is incomplete");
+            }
+            for (const asset of finalAssets) {
+              const expected = local.get(asset.name);
+              if (!expected || asset.state !== "uploaded" || asset.size !== expected.size) {
+                throw new Error(`Final draft asset metadata conflicts: ${asset.name}`);
+              }
+              const response = await github.request(
+                "GET /repos/{owner}/{repo}/releases/assets/{asset_id}",
+                {
+                  ...context.repo,
+                  asset_id: asset.id,
+                  headers: { accept: "application/octet-stream" },
+                },
+              );
+              const digest = crypto.createHash("sha256")
+                .update(Buffer.from(response.data)).digest("hex");
+              if (digest !== expected.sha256) {
+                throw new Error(`Final draft asset hash conflicts: ${asset.name}`);
+              }
+            }
+
+            const published = await github.rest.repos.updateRelease({
+              ...context.repo,
+              release_id: release.id,
+              tag_name: version,
+              target_commitish: target,
+              name: version,
+              body,
+              draft: false,
+              prerelease: false,
+            });
+            if (
+              published.data.tag_name !== version || published.data.name !== version ||
+              published.data.body !== body || published.data.target_commitish !== target ||
+              published.data.draft || published.data.prerelease
+            ) {
+              throw new Error(`Published release ${version} failed exact verification`);
+            }
+            core.notice(`Published ${published.data.html_url}`);

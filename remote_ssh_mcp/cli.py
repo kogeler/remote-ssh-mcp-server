@@ -7,6 +7,7 @@ import asyncio
 import logging
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from . import __version__
 from .config import RuntimeConfig
@@ -41,23 +42,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--version", action="version", version=f"%(prog)s {__version__}"
     )
     parser.add_argument(
-        "--local-root",
-        required=True,
-        help="absolute local directory containing all allowed local file operations",
-    )
-    parser.add_argument(
         "--connect-timeout",
         type=float,
         default=DEFAULT_CONNECT_TIMEOUT,
         metavar="SECONDS",
-        help=f"master startup deadline (default: {DEFAULT_CONNECT_TIMEOUT:g})",
+        help=(
+            "master startup deadline, 0.1..900 seconds "
+            f"(default: {DEFAULT_CONNECT_TIMEOUT:g})"
+        ),
     )
     parser.add_argument(
         "--command-timeout",
         type=float,
         default=DEFAULT_COMMAND_TIMEOUT,
         metavar="SECONDS",
-        help=f"default remote command deadline (default: {DEFAULT_COMMAND_TIMEOUT:g})",
+        help=(
+            "default remote command deadline, 0.1..86400 seconds "
+            f"(default: {DEFAULT_COMMAND_TIMEOUT:g})"
+        ),
     )
     parser.add_argument(
         "--max-output-bytes",
@@ -65,7 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_MAX_OUTPUT_BYTES,
         metavar="BYTES",
         help=(
-            "maximum captured bytes per command stream "
+            "maximum captured bytes per command stream, 1024..67108864 "
             f"(default: {DEFAULT_MAX_OUTPUT_BYTES})"
         ),
     )
@@ -74,7 +76,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_MAX_TRANSFERS,
         metavar="COUNT",
-        help=f"maximum concurrent background transfers (default: {DEFAULT_MAX_TRANSFERS})",
+        help=(
+            "maximum concurrent background transfers, 1..16 "
+            f"(default: {DEFAULT_MAX_TRANSFERS})"
+        ),
     )
     parser.add_argument(
         "--log-level",
@@ -85,12 +90,16 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    repository_root: Path | None = None,
+) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
     try:
-        config = RuntimeConfig.from_namespace(args)
+        config = RuntimeConfig.from_namespace(args, repository_root=repository_root)
     except RemoteMCPError as error:
         parser.error(error.message)
 

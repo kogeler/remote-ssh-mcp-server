@@ -2,12 +2,60 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from collections.abc import Callable
 
 import pytest
 
 from tests.live_support import process as live_process
-from tests.live_support.process import LiveResources
+from tests.live_support.process import LiveFailure, LiveResources, parse_policy
+
+
+def test_run_process_writes_supplied_input() -> None:
+    completed = live_process.run_process(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())",
+        ],
+        input=b"fixture payload",
+        capture_output=True,
+    )
+
+    assert completed.returncode == 0
+    assert completed.stdout == b"fixture payload"
+
+
+def test_parse_policy_accepts_only_the_bounded_user_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = "--pull=never --userns=auto:size=2048 --cap-drop=ALL"
+    monkeypatch.setenv("REMOTE_SSH_MCP_TEST_POLICY", policy)
+
+    assert parse_policy("REMOTE_SSH_MCP_TEST_POLICY") == policy.split()
+
+
+@pytest.mark.parametrize(
+    "user_namespace",
+    (
+        "",
+        "--userns=auto",
+        "--userns=keep-id:size=2048",
+        "--userns=nomap:size=2048",
+        "--userns=host",
+        "--userns=auto:size=65536",
+    ),
+)
+def test_parse_policy_rejects_missing_or_unbounded_user_namespace(
+    monkeypatch: pytest.MonkeyPatch, user_namespace: str
+) -> None:
+    monkeypatch.setenv(
+        "REMOTE_SSH_MCP_TEST_POLICY",
+        f"--pull=never {user_namespace} --cap-drop=ALL",
+    )
+
+    with pytest.raises(LiveFailure, match="must contain exactly"):
+        parse_policy("REMOTE_SSH_MCP_TEST_POLICY")
 
 
 def result(

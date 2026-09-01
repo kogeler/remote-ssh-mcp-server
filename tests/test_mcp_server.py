@@ -56,6 +56,8 @@ if "-M" in args and "-N" in args:
     Path(os.environ["FAKE_SSH_MASTER_PID"]).write_text(str(os.getpid()))
     Path(os.environ["FAKE_SSH_CONTROL_PATH"]).write_text(str(socket_path))
     if os.environ.get("FAKE_SSH_FAIL_MASTER") == "1":
+        if os.environ.get("FAKE_SSH_MASTER_STDERR"):
+            print(os.environ["FAKE_SSH_MASTER_STDERR"], file=sys.stderr)
         raise SystemExit(23)
     server = socket.socket(socket.AF_UNIX)
     server.bind(str(socket_path))
@@ -130,6 +132,10 @@ with source.open("rb") as incoming:
             time.sleep(float(os.environ.get("FAKE_RSYNC_DELAY", "0")))
 """
 
+FAKE_LOGINCTL = r"""#!__PYTHON__
+raise SystemExit(1)
+"""
+
 
 def write_executable(path: Path, content: str) -> None:
     path.write_text(content.replace("__PYTHON__", sys.executable), encoding="utf-8")
@@ -141,6 +147,16 @@ def install_process_fakes(fake_bin: Path) -> None:
     write_executable(fake_bin / "ssh", FAKE_SSH)
     write_executable(fake_bin / "sudo", FAKE_SUDO)
     write_executable(fake_bin / "rsync", FAKE_RSYNC)
+    write_executable(fake_bin / "loginctl", FAKE_LOGINCTL)
+
+
+def isolated_server_command(repository_root: Path) -> list[str]:
+    source = (
+        "from pathlib import Path; "
+        "from remote_ssh_mcp.cli import main; "
+        f"raise SystemExit(main(repository_root=Path({str(repository_root)!r})))"
+    )
+    return [sys.executable, "-c", source]
 
 
 def structured(result: CallToolResult) -> dict[str, object]:
@@ -215,8 +231,7 @@ def test_codex_example_is_disabled_and_exposes_the_complete_toolset() -> None:
     server = config["mcp_servers"]["remote_machine"]
 
     assert server["command"] == "remote-ssh-mcp"
-    assert "--target" not in server["args"]
-    assert server["args"][0] == "--local-root"
+    assert "args" not in server
     assert server["enabled"] is False
     assert server["startup_timeout_sec"] >= 120
     assert set(server["enabled_tools"]) == {
@@ -247,7 +262,6 @@ def test_claude_code_examples_match_tool_names_and_approval_policy() -> None:
     assert server == {
         "type": "stdio",
         "command": "remote-ssh-mcp",
-        "args": ["--local-root", "/absolute/path/to/allowed-local-root"],
         "env": {},
     }
 
@@ -315,7 +329,8 @@ async def test_real_stdio_protocol_and_lifecycle_with_process_fakes(
     cancel_source = tmp_path / "cancel source.bin"
     cancel_source.write_bytes(b"cancel-data" * 800_000)
     (tmp_path / "downloads").mkdir()
-    launcher = Path(__file__).resolve().parents[1] / "remote-ssh-mcp"
+    tmp_path.chmod(0o777)
+    server_command = isolated_server_command(tmp_path)
     environment = {
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
         "FAKE_SSH_AUTH_COUNT": str(auth_count),
@@ -326,10 +341,9 @@ async def test_real_stdio_protocol_and_lifecycle_with_process_fakes(
         "FAKE_RSYNC_DELAY": "0.002",
     }
     parameters = StdioServerParameters(
-        command=str(launcher),
+        command=server_command[0],
         args=[
-            "--local-root",
-            str(tmp_path),
+            *server_command[1:],
             "--connect-timeout",
             "3",
             "--command-timeout",
@@ -642,7 +656,7 @@ async def test_sigterm_cleans_master_with_stdin_still_open(tmp_path: Path) -> No
     auth_count = tmp_path / "auth-count"
     master_pid_file = tmp_path / "master-pid"
     control_path_file = tmp_path / "control-path"
-    launcher = Path(__file__).resolve().parents[1] / "remote-ssh-mcp"
+    server_command = isolated_server_command(tmp_path)
     environment = os.environ.copy()
     environment.update(
         {
@@ -655,9 +669,7 @@ async def test_sigterm_cleans_master_with_stdin_still_open(tmp_path: Path) -> No
         }
     )
     process = await asyncio.create_subprocess_exec(
-        str(launcher),
-        "--local-root",
-        str(tmp_path),
+        *server_command,
         "--connect-timeout",
         "3",
         "--log-level",
@@ -737,8 +749,9 @@ async def test_master_start_failure_is_concise_and_cleans_runtime(
     fake_bin = tmp_path / "bin"
     install_process_fakes(fake_bin)
     control_path_file = tmp_path / "control-path"
-    launcher = Path(__file__).resolve().parents[1] / "remote-ssh-mcp"
+    server_command = isolated_server_command(tmp_path)
     environment = os.environ.copy()
+    raw_master_stderr = "proxy failed through /private/identity/id_hardware"
     environment.update(
         {
             "PATH": f"{fake_bin}:{environment['PATH']}",
@@ -746,15 +759,15 @@ async def test_master_start_failure_is_concise_and_cleans_runtime(
             "FAKE_SSH_MASTER_PID": str(tmp_path / "master-pid"),
             "FAKE_SSH_CONTROL_PATH": str(control_path_file),
             "FAKE_SSH_FAIL_MASTER": "1",
+            "FAKE_SSH_MASTER_STDERR": raw_master_stderr,
             "FAKE_SUDO_LOG": str(tmp_path / "unused-sudo.log"),
             "FAKE_RSYNC_LOG": str(tmp_path / "unused-rsync.log"),
         }
     )
     parameters = StdioServerParameters(
-        command=str(launcher),
+        command=server_command[0],
         args=[
-            "--local-root",
-            str(tmp_path),
+            *server_command[1:],
             "--connect-timeout",
             "3",
             "--log-level",
@@ -774,6 +787,9 @@ async def test_master_start_failure_is_concise_and_cleans_runtime(
             assert isinstance(failed, CallToolResult)
             assert failed.is_error
             assert structured(failed)["error"]["code"] == "connection_start_failed"  # type: ignore[index]
+            assert structured(failed)["error"]["message"] == (  # type: ignore[index]
+                "SSH master exited with status 23"
+            )
             status = await session.call_tool("connection_status", {})
             assert isinstance(status, CallToolResult)
             assert structured(status)["result"]["state"] == "disconnected"  # type: ignore[index]
@@ -782,6 +798,8 @@ async def test_master_start_failure_is_concise_and_cleans_runtime(
         diagnostics = errlog.read()
 
     assert "Traceback" not in diagnostics
+    assert raw_master_stderr not in diagnostics
+    assert "/private/identity/id_hardware" not in diagnostics
     control_path = Path(control_path_file.read_text(encoding="utf-8"))
     assert not control_path.exists()
     assert not control_path.parent.exists()

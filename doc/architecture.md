@@ -5,127 +5,151 @@
 The server provides structured remote operations while preserving native
 OpenSSH behavior for host keys, proxies, and hardware authentication. Its core
 invariants are one deliberate authentication, one owned transport, bounded
-outputs, resumable out-of-band file transfer, and deterministic cleanup.
+outputs, resumable out-of-band transfer, and deterministic selective cleanup.
 
 ## Process Model
 
 ```text
 MCP client
-  `- remote-ssh-mcp launcher
-       `- Python STDIO MCP server
-            |- zero or one foreground OpenSSH ControlMaster
-            |- short-lived ssh mux clients for command channels
-            `- background rsync processes using the same mux socket
+  `- remote-ssh-mcp (source launcher or native standalone executable)
+       `- Python STDIO server
+            |- zero or one OpenSSH master from the installed ssh_wrapper wheel
+            |- short-lived mux-only command channels
+            `- background rsync processes over the same mux socket
 ```
 
-The server does not listen on TCP or HTTP. MCP protocol messages use stdout;
-diagnostics use stderr. The Python process owns every child it creates.
+The server opens no MCP network listener. Protocol messages use stdout and
+local diagnostics use stderr. The Python process owns every child it creates.
 
-## Connection Lifecycle
+## Boundaries
 
-The application begins `disconnected`. A strict `connect` request chooses an
-OpenSSH alias or a direct host/user/port tuple and creates a private runtime
-directory, control socket, and foreground master. Readiness requires a
-successful OpenSSH control check.
+The published [`ssh-wrapper`](https://pypi.org/project/ssh-wrapper/0.1.0/)
+package owns connection authority, OpenSSH process and socket ownership,
+session-environment recovery, and bounded master diagnostics. This project
+adapts that public library API to MCP, supervises its MCP command process
+groups, and contains no second SSH transport implementation.
 
-Only after readiness are command, inspection, sudo, and transfer services
-attached. The states are `starting`, `ready`, `lost`, `closing`, and `closed`,
-with an external `disconnected` state when no master is owned. A target change
-requires explicit disconnect. Master loss is observable but never causes
-reconnection.
+`remote_ssh_mcp.config` owns MCP-specific limits and local-root selection;
+`remote_ssh_mcp.local_paths` owns containment below that root.
+`remote_ssh_mcp.master` is the small constructor adapter. `commands`,
+`inspection`, `sudo`, and `transfers` implement the MCP operations.
+`mcp_models` and `server` own strict public schemas, annotations, lifecycle,
+and the safe error boundary.
 
-Mux clients contain neither a destination until final argv assembly nor any
-usable fallback authentication. Rsync receives the identical transport through
-its `-e` argument.
+## Lifecycle
+
+The process begins disconnected. `connect` selects an alias or direct
+host/user pair with an optional port and starts one master. Operational
+services become available only after the master is ready. A target change
+requires explicit disconnect. A lost master stays lost until the caller
+deliberately disconnects and reconnects.
+
+Immediately before that first master starts, Linux may run two bounded probes.
+`loginctl show-user` supplies the current UID's runtime path; only an absolute,
+existing directory owned by that UID is accepted. A private probe environment
+then routes `systemctl --user show-environment` to that runtime's bus. Parsing
+accepts only the documented display, runtime, D-Bus, askpass, and agent
+variables and fills only absent or empty inherited values. Both probes use
+fixed argv, null stdin, bounded output, short deadlines, no shell, and owned
+process-group cleanup. Their absence or failure leaves the inherited OpenSSH
+environment unchanged.
+
+Readiness requires a successful OpenSSH control check. States progress through
+`starting`, `ready`, `lost`, `closing`, and `closed`; the MCP adapter exposes
+`disconnected` when no master is owned. Only after readiness are command,
+inspection, sudo, and transfer services attached. The recovered environment is
+given only to the initial master. Mux channels and rsync receive neither that
+mapping nor raw master diagnostics.
 
 ## Command Data Path
 
-Commands are UTF-8 shell scripts delivered over stdin to a fixed remote
-non-PTY shell. A supervisor creates a remote process group and watches channel
-EOF so timeout, cancellation, or local process loss terminates remote children.
-Each invocation is isolated and has a bounded deadline.
+UTF-8 scripts enter a fixed remote non-PTY shell through stdin. A supervisor
+creates one remote process group and registers a detached channel-loss watcher
+before releasing the script payload through private FIFOs. The supervisor
+waits on only the exec'd command process; the watcher PID and activation gate
+never compete with payload input or the shell's child-status handling. Timeout,
+cancellation, or local transport loss therefore terminates remote descendants
+without losing a short-lived command's exit status. Stdout and stderr are
+drained concurrently; each capture is bounded independently. Optional full
+spooling writes only below the protected local boundary.
 
-Stdout and stderr are drained concurrently to avoid pipe deadlocks. Capture is
-bounded per stream; optional full spooling writes to protected local files.
-Inspection is implemented as fixed remote programs whose machine-readable
-output is parsed into strict models.
-
-`sudo_exec` uses the same command runner with a fixed sudo remote program and a
-random start marker. The marker distinguishes sudo refusal from a privileged
-command that started successfully and later exited nonzero.
+Inspection invokes fixed remote programs and parses their machine-readable
+output into strict models. `sudo_exec` uses the same runner with a fixed sudo
+program and a random start marker, distinguishing refusal before execution
+from a privileged command that starts and then exits nonzero.
 
 ## Transfer Data Path
 
-Each single-file transfer is an in-memory operation record with a random ID and
-an asynchronous task. Rsync copies directly between local storage and the
-remote host. Progress and output tails are bounded.
+Each single-file transfer has an in-memory operation record, random public ID,
+and asynchronous task. Rsync copies directly between local storage and the
+remote account, while MCP carries only bounded progress and diagnostic tails.
 
 Partial names are deterministic over direction, connection identity, source,
-and destination, enabling resume without a persistent database. Downloads use
-a private local partial; uploads use a same-directory remote partial. SHA-256
-verification precedes atomic final publication. Completed operation metadata
-is retained for a bounded time, while transfer state itself does not survive an
-MCP server restart.
+and destination. Downloads use a protected local partial; uploads use a
+same-directory remote partial. SHA-256 verification precedes atomic final
+publication. Completed metadata has bounded retention; transfer state does not
+survive server restart.
 
 ## Components
 
-- `cli.py`: startup policy and process entry behavior.
-- `config.py`: immutable runtime settings and connection specifications.
-- `server.py`: MCP lifecycle, tool registry, annotations, and public errors.
-- `master.py`: OpenSSH master, mux transport, state, and cleanup.
-- `commands.py`: supervised non-PTY execution and bounded capture.
-- `inspection.py`: structured remote filesystem inspection.
-- `sudo.py`: passwordless-only privilege boundary.
-- `local_paths.py`: local containment and protected state.
-- `transfers.py`: background rsync, resume, hashes, and publication.
-- `mcp_models.py`: strict protocol input and output schemas.
+- `remote_ssh_mcp/cli.py` owns command-line parsing and entry behavior.
+- `remote_ssh_mcp/config.py` validates MCP limits and selects the local root.
+- `remote_ssh_mcp/server.py` owns lifecycle, tool registration, annotations,
+  strict schemas, and the public error boundary.
+- `remote_ssh_mcp/master.py` preserves the MCP constructor while delegating the
+  owned transport to `ssh_wrapper`.
+- `remote_ssh_mcp/commands.py` provides supervised non-PTY execution and
+  bounded capture.
+- `remote_ssh_mcp/inspection.py` parses structured filesystem inspection.
+- `remote_ssh_mcp/sudo.py` enforces passwordless, cache-independent sudo.
+- `remote_ssh_mcp/local_paths.py` confines local paths and private state.
+- `remote_ssh_mcp/transfers.py` owns rsync, resume, verification, and
+  publication.
+- `remote_ssh_mcp/mcp_models.py` defines strict protocol input/output models.
 
 ## Key Decisions
 
-- **Native OpenSSH:** preserves mature SSH config, ProxyJump, host-key checking,
-  and system FIDO2/PIN behavior.
-- **Local STDIO MCP:** avoids another network service and authentication layer.
-- **Explicit lifecycle:** prevents a client startup or transport failure from
-  unexpectedly requesting a PIN or hardware touch.
-- **One master:** makes authentication reuse and ownership auditable.
-- **Rsync data plane:** streams and resumes large files without MCP payloads.
-- **`sudo -n -k`:** enforces cache-independent NOPASSWD behavior.
-- **Explicit runtime installation:** `make runtime-venv` owns a persistent,
-  runtime-only host environment; the launcher validates and uses it but never
-  installs code.
-- **Split development environments:** Ruff alone has a hash-verified host venv
-  for editor integration, project-aware checks run in a confined toolbox, and
-  host-only tests use a temporary venv removed at exit.
+- Native OpenSSH preserves mature SSH configuration, ProxyJump, host-key
+  checking, and system hardware-token behavior.
+- Narrow Linux session recovery reaches an existing native askpass route
+  without importing a complete login environment.
+- Local STDIO MCP avoids another listener and authentication layer.
+- Explicit connect/disconnect prevents startup or transport loss from
+  unexpectedly requesting another PIN or hardware touch.
+- One master makes authentication reuse and ownership auditable.
+- Rsync streams and resumes large files without carrying their bytes in MCP.
+- `sudo -n -k` requires an explicit NOPASSWD policy on every invocation.
+- Explicit runtime installation keeps dependency mutation out of launch.
+- The verified parent of the active project-owned venv is the only implicit
+  local filesystem boundary; its project version must match the active package,
+  and package installation paths are never boundaries.
+- A standalone executable instead receives its own containing directory as an
+  explicit local boundary; PyInstaller's temporary extraction directory and
+  the caller's current directory are never used.
+- Validated tar pipes isolate container inputs and outputs from host paths.
 
 ## Repository Layout
 
 ```text
-remote-ssh-mcp              Bash runtime validator and launcher
-remote-ssh-mcp.py           Python executable entry point
-remote_ssh_mcp/             implementation package
-tests/                      local and opt-in live tests
-tests/live_harness.py       thin Podman live-test CLI
-tests/live_support/         live topology, SSH material, cleanup, and orchestration
-doc/                        user and maintainer documentation
-requirements.txt            hashed runtime dependency lock
-requirements-dev.txt        hashed runtime and development lock
-requirements-lint.txt       hashed Ruff-only host-tool lock
-pyproject.toml              runtime/toolbox dependencies and project metadata
-tools/lint/pyproject.toml   isolated Ruff environment manifest
-containers/                 toolbox/resolver and live-target definitions
-make/                       shared container and live-test policy
-Makefile                    development and validation interface
-AGENTS.md                   agent navigation and invariants
+remote-ssh-mcp             isolated runtime validator and production launcher
+remote-ssh-mcp.py          explicit-root entry point for streamed live payloads
+remote_ssh_mcp/            implementation package
+tests/                     MCP-only unit and process tests
+tests/live_support/        MCP-only live Podman orchestration
+containers/                toolbox, compatibility, and disposable SSH images
+make/                      container and live target definitions
+tools/container_payload.py bounded deterministic pipe transport
+tools/*standalone*.py      native Linux build, provenance, verification, and smoke
+doc/                       project documentation and client examples
+pyproject.toml             package and validation policy
+requirements*.txt          generated runtime, development, lint, standalone, and docs locks
+Makefile                   supported local commands
 ```
 
 ## Possible Future Scope
 
-The current boundaries are intentional, but compatible future work could add:
-
-- recursive directory synchronization with explicit trailing-slash semantics;
-- granular argv-based sudo compatible with command-specific sudoers rules;
-- persistent transfer metadata and stale-partial retention policy;
-- optional bandwidth limits and transfer scheduling;
-- an independent remote path root below the SSH account's authority;
-- tested support for non-Linux remote systems;
-- optional audit or telemetry integration that preserves secret boundaries.
+Compatible additions could include recursive synchronization with explicit
+trailing-slash semantics, command-specific argv sudo, persistent transfer
+metadata and stale-partial policy, optional bandwidth scheduling, an
+independent remote path root, non-Linux remote support, or audit integration
+that preserves the existing secret and error boundaries.

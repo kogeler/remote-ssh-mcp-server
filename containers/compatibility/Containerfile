@@ -1,0 +1,42 @@
+# Copyright (c) 2026 kogeler. SPDX-License-Identifier: MIT.
+
+# Resolve and test the declared minimum Python without committing another lock.
+# The base reference is an immutable multi-architecture official Python image.
+FROM docker.io/library/python:3.13-slim@sha256:8fef26df932191825664e4957ff488c96dfe64918327634a357a55facbc994d3
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_ROOT_USER_ACTION=ignore \
+    PYTHONDONTWRITEBYTECODE=1
+
+RUN useradd --create-home --uid 1000 --shell /bin/bash box \
+    && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install --yes \
+        --no-install-recommends \
+        openssh-client \
+        procps \
+        rsync \
+        shellcheck \
+        tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# This environment resolves a disposable graph, so it carries the same exact
+# wheel-only self-hosting resolver tree as the ordinary lock image.
+RUN python -m pip install --quiet --only-binary=:all: \
+        pip==26.2.1 \
+        setuptools==84.0.0 \
+        pip-tools==7.6.1 \
+        build==1.5.0 \
+        click==8.4.2 \
+        packaging==26.3 \
+        pyproject-hooks==1.2.0 \
+        wheel==0.48.0
+
+COPY remote_ssh_mcp/containers/toolbox/entrypoint.sh /usr/local/sbin/toolbox-entrypoint
+COPY remote_ssh_mcp/tools/container_payload.py /usr/local/libexec/container-payload
+RUN chmod 0755 /usr/local/sbin/toolbox-entrypoint \
+    /usr/local/libexec/container-payload
+
+USER box
+WORKDIR /work
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/sbin/toolbox-entrypoint"]

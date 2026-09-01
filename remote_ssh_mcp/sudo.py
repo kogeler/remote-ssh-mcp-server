@@ -72,7 +72,7 @@ class SudoRunner:
     ) -> CapturedStream:
         cleaned = stream.remove_once(marker)
         if stream.spool_path is not None:
-            spool = self.runner.paths.root / stream.spool_path
+            spool = self.runner.paths.repository / stream.spool_path
             await asyncio.to_thread(_remove_marker_from_file, spool, marker)
         return cleaned
 

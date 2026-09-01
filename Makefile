@@ -1,239 +1,439 @@
 SHELL := /bin/bash
 .SHELLFLAGS := -euo pipefail -c
 .DEFAULT_GOAL := help
+.NOTPARALLEL:
 
-# Ruff is the only persistent host-side development tool: one self-contained
-# binary with no dependencies, also used by editors for format-on-save. The
-# separately installed runtime is for running the MCP server, not development.
-RUNTIME_VENV := venv-runtime
-RUNTIME_PYTHON := $(RUNTIME_VENV)/bin/python
-RUNTIME_STATE := $(RUNTIME_VENV)/.requirements.txt
-LINT_VENV := venv-lint
-LINT_PYTHON := $(LINT_VENV)/bin/python
-LINT_LOCK := requirements-lint.txt
-LINT_PROJECT := tools/lint/pyproject.toml
-RUFF := $(LINT_VENV)/bin/ruff
 SYSTEM_PYTHON ?= python3
+RUNTIME_VENV := venv-runtime
+DEV_VENV := venv-dev
+LINT_VENV := venv-lint
+STANDALONE_VENV := venv-standalone
+DOCS_VENV := venv-docs
+RUNTIME_PYTHON := $(RUNTIME_VENV)/bin/python
+DEV_PYTHON := $(DEV_VENV)/bin/python
+LINT_PYTHON := $(LINT_VENV)/bin/python
+STANDALONE_PYTHON := $(STANDALONE_VENV)/bin/python
+DOCS_PYTHON := $(DOCS_VENV)/bin/python
+RUFF := $(LINT_VENV)/bin/ruff
+MKDOCS := $(DOCS_VENV)/bin/mkdocs
 RUNTIME_LOCK := requirements.txt
 DEVELOPMENT_LOCK := requirements-dev.txt
-# --generate-hashes turns every install into a verified install. The header
-# pip-compile writes is also what lets Dependabot recompile the whole tree
-# instead of editing one line, so never add --no-header.
-COMPILE := --quiet --strip-extras --allow-unsafe --generate-hashes
+LINT_LOCK := requirements-lint.txt
+STANDALONE_LOCK := requirements-standalone.txt
+DOCS_LOCK := requirements-docs.txt
+LINT_PROJECT := tools/lint/pyproject.toml
+COMPILE := --quiet --strip-extras --allow-unsafe --generate-hashes \
+	--no-emit-find-links --rebuild
 LOCK_UPGRADE ?=
-LAUNCHER := ./remote-ssh-mcp
-SOURCES := remote_ssh_mcp tests remote-ssh-mcp.py
+VERSION_ARGS ?=
+ARTIFACTS := .artifacts
 COVERAGE_REPORT := coverage-report.md
 COVERAGE_TOTAL := coverage-total.txt
-PR_COMMENT := .github/scripts/pr-comment.sh
+DEPENDENCY_SNAPSHOT := $(ARTIFACTS)/dependency-snapshot.json
+RELEASE_NOTES := $(ARTIFACTS)/release-notes.md
+NORMALIZATION_EPOCH := 315532800
+STANDALONE_ARCH ?=
 ANNOTATE := .github/scripts/annotate-diagnostics.sh
-# Every Bash file in the repository, so syntax and lint cover all of them.
-SHELL_FILES := $(LAUNCHER) \
-	containers/toolbox/entrypoint.sh containers/live-target/entrypoint.sh \
-	$(PR_COMMENT) $(ANNOTATE)
-COVERAGE_DATA := .coverage
-# CI sets RUFF_OUTPUT_FORMAT=github to annotate the diff; local runs keep the
-# default Ruff rendering.
-RUFF_OUTPUT_FORMAT ?=
-RUFF_OUTPUT := $(if $(RUFF_OUTPUT_FORMAT),--output-format=$(RUFF_OUTPUT_FORMAT))
-# pyproject.toml owns the single coverage threshold; never duplicate the value.
-READ_THRESHOLD := import pathlib, tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["tool"]["coverage"]["report"]["fail_under"])
-COVERAGE_THRESHOLD = $(shell $(SYSTEM_PYTHON) -c '$(READ_THRESHOLD)')
+SOURCES := remote_ssh_mcp tests tools/container_payload.py \
+	tools/audit_docs_site.py tools/build_standalone.py tools/checksums.py \
+	tools/smoke_standalone.py \
+	tools/standalone_entry.py tools/verify_standalone.py \
+	.github/scripts/dependency_audit.py \
+	.github/scripts/dependency_snapshot.py .github/scripts/license_policy.py \
+	.github/scripts/pr_body.py \
+	.github/scripts/version.py \
+	doc/site remote-ssh-mcp.py
+SHELL_FILES := remote-ssh-mcp containers/toolbox/entrypoint.sh \
+	containers/live-target/entrypoint.sh containers/live-target/install-base.sh \
+	$(ANNOTATE)
+ACTIONLINT_IMAGE := docker.io/rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
 
 include make/container.mk
 include make/live.mk
 
-.PHONY: help runtime-venv lint-venv lock refresh-dependencies freeze-check format lint \
-	typecheck bandit audit test coverage-report syntax shellcheck check ci clean
+.PHONY: help runtime-venv dev-venv lint-venv standalone-venv docs-venv lock \
+	refresh-dependencies freeze-check format format-check lint type-check bandit \
+	test host-tests package standalone smoke-standalone checksums \
+	docs-build docs-audit docs-serve \
+	test-network-block confinement-test coverage-report syntax \
+	shellcheck version-check version-sync release-notes dependency-snapshot \
+	compatibility-python audit audit-raw licenses outdated \
+	validator-image-actionlint validate-actions check ci clean
 
 help:
 	@printf '%s\n' \
-		'make runtime-venv  Install the explicit runtime-only host environment' \
-		'make host-tests    Run host tests; requires a prepared runtime venv' \
-		'make lock          Recompile all three locks after a dependency change' \
-		'make refresh-dependencies' \
-		'                   Recompile all locks at latest compatible versions' \
+		'make runtime-venv  Install the explicit runtime environment' \
+		'make lock          Regenerate all five exact hash locks' \
+		'make refresh-dependencies  Upgrade and regenerate all locks' \
 		'make format        Apply Ruff fixes and formatting' \
-		'make lint          Check Ruff lint and formatting' \
-		'make typecheck     Run strict mypy static type analysis' \
-		'make bandit       Scan Python runtime code for security issues' \
-		'make audit         Scan the installed dependency tree for CVEs' \
-		'make test          Run pytest in parallel worker processes' \
-		'make coverage-report' \
-		'                   Print the Markdown coverage report for the last test run' \
-		'make shellcheck    Check every repository Bash file with ShellCheck' \
-		'make check         Run all local checks' \
-		'make ci            Run local checks and the online dependency audit' \
-		'make clean         Remove caches and generated build metadata' \
-		'make live-preflight' \
-		'                   Validate the automatic ephemeral-key live test' \
-		'make live-test    Run live test; requires a prepared runtime venv' \
-		'make live-fido-preflight PUBLIC_KEY=... IDENTITY_FILE=...' \
-		'                   Validate the hardware-key live test' \
+		'make test          Run the ordinary parallel test suite' \
+		'make package       Build and install-test wheel and source archive' \
+		'make standalone    Build and validate this host architecture binary' \
+		'make smoke-standalone  Exercise the native binary outside the source tree' \
+		'make docs-audit    Render and audit the documentation site' \
+		'make docs-serve    Serve the documentation site locally' \
+		'make host-tests    Run explicitly marked host tests' \
+		'make audit         Enforce reviewed vulnerability policy' \
+		'make licenses      Enforce license policy across all five locks' \
+		'make dependency-snapshot  Render the five lock manifests' \
+		'make version-check Verify exact release metadata' \
+		'make release-notes Render notes for the current version' \
+		'make images        Build the project development and live images' \
+		'make live-test     Run the automatic ephemeral-key MCP live matrix' \
 		'make live-fido-test PUBLIC_KEY=... IDENTITY_FILE=...' \
-		'                   Run the hardware-key live test'
+		'                  Run the operator-controlled hardware-key matrix' \
+		'make check         Run tests, linters, packaging, policy, and compatibility' \
+		'make ci            Run make check plus the vulnerability audit'
 
-# This is an explicit installation step. The launcher never creates an
-# environment or invokes pip when an MCP client starts it.
 runtime-venv:
-	@command -v $(SYSTEM_PYTHON) >/dev/null 2>&1 || { \
-		printf 'required command not found: %s\n' '$(SYSTEM_PYTHON)' >&2; \
-		exit 1; \
-	}
-	@$(SYSTEM_PYTHON) -c 'import sys; sys.exit("Python 3.11 or newer is required") if sys.version_info < (3, 11) else None'
-	@if [[ ! -x "$(RUNTIME_PYTHON)" ]] || \
-		[[ ! -f "$(RUNTIME_STATE)" ]] || \
-		! cmp -s $(RUNTIME_LOCK) "$(RUNTIME_STATE)" || \
-		"$(RUNTIME_PYTHON)" -c 'import pip' >/dev/null 2>&1; then \
-		if [[ -e "$(RUNTIME_VENV)" ]]; then \
-			find "$(RUNTIME_VENV)" -depth -delete; \
+	@if [[ ! -x '$(RUNTIME_PYTHON)' ]] || \
+		[[ ! -f '$(RUNTIME_VENV)/.requirements.txt' ]] || \
+		[[ ! -f '$(RUNTIME_VENV)/.version' ]] || \
+		! cmp -s requirements.txt '$(RUNTIME_VENV)/.requirements.txt' || \
+		! cmp -s .version '$(RUNTIME_VENV)/.version' || \
+		! '$(RUNTIME_PYTHON)' -c 'import importlib.metadata, pathlib, remote_ssh_mcp, ssh_wrapper; expected = pathlib.Path(".version").read_text(encoding="utf-8").strip(); assert remote_ssh_mcp.__version__ == expected; assert importlib.metadata.version("remote-ssh-mcp") == expected; assert importlib.metadata.version("ssh-wrapper") == "0.1.0"' >/dev/null 2>&1 || \
+		'$(RUNTIME_PYTHON)' -c 'import pip' >/dev/null 2>&1; then \
+		if [[ -e '$(RUNTIME_VENV)' ]]; then \
+			find '$(RUNTIME_VENV)' -depth -delete; \
 		fi; \
-		$(SYSTEM_PYTHON) -m venv "$(RUNTIME_VENV)"; \
-		$(RUNTIME_PYTHON) -m pip install --quiet --require-hashes \
-			--only-binary=:all: --requirement $(RUNTIME_LOCK); \
-		$(RUNTIME_PYTHON) -m pip uninstall --quiet --yes pip; \
-		cp -- $(RUNTIME_LOCK) "$(RUNTIME_STATE)"; \
+		'$(SYSTEM_PYTHON)' -m venv '$(RUNTIME_VENV)'; \
+		'$(RUNTIME_PYTHON)' -m pip install --quiet --require-hashes \
+			--only-binary=:all: \
+			--requirement requirements.txt; \
+		'$(RUNTIME_PYTHON)' -m pip install --quiet --no-deps --editable .; \
+		'$(RUNTIME_PYTHON)' -m pip check; \
+		'$(RUNTIME_PYTHON)' -m pip uninstall --quiet --yes pip; \
+		cp -- requirements.txt '$(RUNTIME_VENV)/.requirements.txt'; \
+		cp -- .version '$(RUNTIME_VENV)/.version'; \
 	fi
 
-# Compiling locks resolves dependencies, so it needs the network, and it writes
-# the result back to the work tree.
+dev-venv:
+	@if [[ ! -x '$(DEV_PYTHON)' ]] || \
+		[[ ! -f '$(DEV_VENV)/.requirements-dev.txt' ]] || \
+		! cmp -s requirements-dev.txt '$(DEV_VENV)/.requirements-dev.txt' || \
+		! '$(DEV_PYTHON)' -c 'import importlib.metadata, pip, ssh_wrapper; assert importlib.metadata.version("ssh-wrapper") == "0.1.0"' >/dev/null 2>&1; then \
+		if [[ -e '$(DEV_VENV)' ]]; then find '$(DEV_VENV)' -depth -delete; fi; \
+		'$(SYSTEM_PYTHON)' -m venv '$(DEV_VENV)'; \
+		'$(DEV_PYTHON)' -m pip install --quiet --require-hashes \
+			--only-binary=:all: \
+			--requirement requirements-dev.txt; \
+		cp -- requirements-dev.txt '$(DEV_VENV)/.requirements-dev.txt'; \
+	fi
+	@$(DEV_PYTHON) -m pip install --quiet --no-deps --editable .
+	@$(DEV_PYTHON) -m pip check
+
+standalone-venv:
+	@if [[ ! -x '$(STANDALONE_PYTHON)' ]] || \
+		[[ ! -f '$(STANDALONE_VENV)/.requirements-standalone.txt' ]] || \
+		! cmp -s '$(STANDALONE_LOCK)' \
+			'$(STANDALONE_VENV)/.requirements-standalone.txt' || \
+		! '$(STANDALONE_PYTHON)' -c \
+			'import PyInstaller, mcp, pip, pydantic, ssh_wrapper' \
+			>/dev/null 2>&1; then \
+		if [[ -e '$(STANDALONE_VENV)' ]]; then \
+			find '$(STANDALONE_VENV)' -depth -delete; \
+		fi; \
+		'$(SYSTEM_PYTHON)' -m venv '$(STANDALONE_VENV)'; \
+		'$(STANDALONE_PYTHON)' -m pip install --quiet --require-hashes \
+			--only-binary=:all: --requirement '$(STANDALONE_LOCK)'; \
+		cp -- '$(STANDALONE_LOCK)' \
+			'$(STANDALONE_VENV)/.requirements-standalone.txt'; \
+	fi
+	@$(STANDALONE_PYTHON) -m pip check
+
 lock: lock-image
 	@$(BOX_ARCHIVE) | $(PODMAN) run $(LOCK_ONLINE) \
-		--env BOX_EXPORT="$(RUNTIME_LOCK) $(DEVELOPMENT_LOCK) $(LINT_LOCK)" \
-		--env BOX_EXPORT_ON_SUCCESS=1 $(LOCK_TAG) \
-		sh -ceu 'python -m piptools compile $(COMPILE) $(LOCK_UPGRADE) \
+		--env BOX_EXPORT="$(RUNTIME_LOCK) $(DEVELOPMENT_LOCK) $(LINT_LOCK) $(STANDALONE_LOCK) $(DOCS_LOCK)" \
+		--env BOX_EXPORT_ON_SUCCESS=1 $(LOCK_TAG) sh -ceu \
+		'python -m piptools compile $(COMPILE) $(LOCK_UPGRADE) \
 			--output-file=$(RUNTIME_LOCK) pyproject.toml; \
-			python -m piptools compile $(COMPILE) $(LOCK_UPGRADE) --extra=dev \
-				--output-file=$(DEVELOPMENT_LOCK) pyproject.toml; \
-			python -m piptools compile $(COMPILE) $(LOCK_UPGRADE) \
-				--output-file=$(LINT_LOCK) $(LINT_PROJECT); \
-			chmod 0644 $(RUNTIME_LOCK) $(DEVELOPMENT_LOCK) $(LINT_LOCK)' \
-		| tar --extract --file=- --no-same-owner
+		python -m piptools compile $(COMPILE) $(LOCK_UPGRADE) \
+			--extra=dev --output-file=$(DEVELOPMENT_LOCK) pyproject.toml; \
+		python -m piptools compile $(COMPILE) $(LOCK_UPGRADE) \
+			--output-file=$(LINT_LOCK) $(LINT_PROJECT); \
+		python -m piptools compile $(COMPILE) $(LOCK_UPGRADE) \
+			--extra=standalone --output-file=$(STANDALONE_LOCK) pyproject.toml; \
+		python -m piptools compile $(COMPILE) $(LOCK_UPGRADE) \
+			--extra=docs --output-file=$(DOCS_LOCK) pyproject.toml; \
+		chmod 0644 $(RUNTIME_LOCK) $(DEVELOPMENT_LOCK) $(LINT_LOCK) \
+			$(STANDALONE_LOCK) $(DOCS_LOCK)' \
+		| $(PAYLOAD_MERGE)
 
 refresh-dependencies:
 	@$(MAKE) lock LOCK_UPGRADE=--upgrade
-	@for path in $(RUNTIME_VENV) $(LINT_VENV); do \
+	@for path in $(RUNTIME_VENV) $(DEV_VENV) $(LINT_VENV) $(STANDALONE_VENV) \
+		$(DOCS_VENV); do \
 		if [[ -e "$$path" ]]; then find "$$path" -depth -delete; fi; \
 	done
-	@$(MAKE) lint-venv
 
-# Recompiling without --upgrade keeps every satisfiable pin, so this reports
-# only a lock that no longer matches pyproject.toml.
 freeze-check: lock-image
-	@$(BOX_ARCHIVE) | $(PODMAN) run $(LOCK_ONLINE) $(LOCK_TAG) \
-		bash -ceu 'cp $(RUNTIME_LOCK) /tmp/runtime.txt; \
-		cp $(DEVELOPMENT_LOCK) /tmp/development.txt; \
-		cp $(LINT_LOCK) /tmp/lint.txt; \
-		python -m piptools compile $(COMPILE) \
-			--output-file=/tmp/runtime.txt pyproject.toml; \
+	@$(BOX_ARCHIVE) | $(PODMAN) run $(LOCK_ONLINE) $(LOCK_TAG) bash -ceu \
+		'python -m piptools compile $(COMPILE) \
+			--constraint=$(RUNTIME_LOCK) --output-file=/tmp/runtime.txt \
+			pyproject.toml; \
 		python -m piptools compile $(COMPILE) --extra=dev \
+			--constraint=$(DEVELOPMENT_LOCK) \
 			--output-file=/tmp/development.txt pyproject.toml; \
 		python -m piptools compile $(COMPILE) \
-			--output-file=/tmp/lint.txt $(LINT_PROJECT); \
+			--constraint=$(LINT_LOCK) --output-file=/tmp/lint.txt \
+			$(LINT_PROJECT); \
+		python -m piptools compile $(COMPILE) --extra=standalone \
+			--constraint=$(STANDALONE_LOCK) \
+			--output-file=/tmp/standalone.txt pyproject.toml; \
+		python -m piptools compile $(COMPILE) --extra=docs \
+			--constraint=$(DOCS_LOCK) \
+			--output-file=/tmp/docs.txt pyproject.toml; \
 		diff -u <(sed "/^[[:space:]]*#/d" $(RUNTIME_LOCK)) \
 			<(sed "/^[[:space:]]*#/d" /tmp/runtime.txt); \
 		diff -u <(sed "/^[[:space:]]*#/d" $(DEVELOPMENT_LOCK)) \
 			<(sed "/^[[:space:]]*#/d" /tmp/development.txt); \
 		diff -u <(sed "/^[[:space:]]*#/d" $(LINT_LOCK)) \
-			<(sed "/^[[:space:]]*#/d" /tmp/lint.txt)'
+			<(sed "/^[[:space:]]*#/d" /tmp/lint.txt); \
+		diff -u <(sed "/^[[:space:]]*#/d" $(STANDALONE_LOCK)) \
+			<(sed "/^[[:space:]]*#/d" /tmp/standalone.txt); \
+		diff -u <(sed "/^[[:space:]]*#/d" $(DOCS_LOCK)) \
+			<(sed "/^[[:space:]]*#/d" /tmp/docs.txt)'
 
-# Formatting and lint run on the host so an editor shares one Ruff version
-# with CI. Every other check runs in the toolbox container.
-
-# Recreate the environment whenever the lock changes so a package removed from
-# the lock cannot remain installed on the host.
 lint-venv:
-	@command -v $(SYSTEM_PYTHON) >/dev/null 2>&1 || { \
-		printf 'required command not found: %s\n' '$(SYSTEM_PYTHON)' >&2; \
-		exit 1; \
-	}
-	@if [[ ! -x "$(RUFF)" ]] || \
-		[[ ! -f "$(LINT_VENV)/.$(LINT_LOCK)" ]] || \
-		! cmp -s $(LINT_LOCK) "$(LINT_VENV)/.$(LINT_LOCK)"; then \
-		if [[ -e "$(LINT_VENV)" ]]; then find "$(LINT_VENV)" -depth -delete; fi; \
-		$(SYSTEM_PYTHON) -m venv "$(LINT_VENV)"; \
-		$(LINT_PYTHON) -m pip install --quiet --require-hashes \
-			--only-binary=:all: --requirement $(LINT_LOCK); \
-		cp -- $(LINT_LOCK) "$(LINT_VENV)/.$(LINT_LOCK)"; \
+	@if [[ ! -x '$(RUFF)' ]] || \
+		[[ ! -f '$(LINT_VENV)/.requirements-lint.txt' ]] || \
+		! cmp -s requirements-lint.txt '$(LINT_VENV)/.requirements-lint.txt'; then \
+		if [[ -e '$(LINT_VENV)' ]]; then find '$(LINT_VENV)' -depth -delete; fi; \
+		'$(SYSTEM_PYTHON)' -m venv '$(LINT_VENV)'; \
+		'$(LINT_PYTHON)' -m pip install --quiet --require-hashes \
+			--only-binary=:all: --requirement requirements-lint.txt; \
+		cp -- requirements-lint.txt '$(LINT_VENV)/.requirements-lint.txt'; \
 	fi
+
+docs-venv:
+	@if [[ ! -x '$(MKDOCS)' ]] || \
+		[[ ! -f '$(DOCS_VENV)/.requirements-docs.txt' ]] || \
+		! cmp -s '$(DOCS_LOCK)' '$(DOCS_VENV)/.requirements-docs.txt' || \
+		! '$(DOCS_PYTHON)' -c 'import mkdocs, pip' >/dev/null 2>&1; then \
+		if [[ -e '$(DOCS_VENV)' ]]; then find '$(DOCS_VENV)' -depth -delete; fi; \
+		'$(SYSTEM_PYTHON)' -m venv '$(DOCS_VENV)'; \
+		'$(DOCS_PYTHON)' -m pip install --quiet --require-hashes \
+			--only-binary=:all: --requirement '$(DOCS_LOCK)'; \
+		cp -- '$(DOCS_LOCK)' '$(DOCS_VENV)/.requirements-docs.txt'; \
+	fi
+
+docs-build: docs-venv
+	@$(MKDOCS) build --strict --clean
+
+docs-audit: docs-build
+	@$(SYSTEM_PYTHON) tools/audit_docs_site.py \
+		--site-dir site \
+		--site-url 'https://kogeler.github.io/remote-ssh-mcp-server/'
+
+docs-serve: docs-venv
+	@$(MKDOCS) serve --strict
 
 format: lint-venv
 	@$(RUFF) check --fix $(SOURCES)
 	@$(RUFF) format $(SOURCES)
 
-lint: lint-venv
-	@$(RUFF) check $(RUFF_OUTPUT) $(SOURCES)
+format-check: lint-venv
 	@$(RUFF) format --check $(SOURCES)
 
-# mypy and Bandit read the code without running it, but mypy needs the runtime
-# dependency tree to resolve types, so they stay in the container where that
-# tree already lives.
-typecheck: toolbox-image
-	@$(BOX_ARCHIVE) | $(PODMAN) run $(BOX_CONFINE) $(TOOLBOX_TAG) \
-		python -m mypy | $(ANNOTATE) mypy
+lint: lint-venv
+	@$(RUFF) check $(SOURCES)
 
-bandit: toolbox-image
-	$(BOX_RUN) python -m bandit -q -c pyproject.toml -r \
-		remote_ssh_mcp remote-ssh-mcp.py
+type-check: dev-venv
+	@set -o pipefail; $(DEV_PYTHON) -m mypy | bash $(ANNOTATE) mypy
 
-# The audit resolves advisories, which is the one reason a check may reach the
-# network. It inspects the toolbox's own installed tree, which is the
-# development lock.
-audit: toolbox-image
-	$(BOX_RUN_ONLINE) python -m pip_audit --local --strict
+bandit: dev-venv
+	@$(DEV_PYTHON) -m bandit -q -c pyproject.toml -r \
+		remote_ssh_mcp remote-ssh-mcp.py tools/audit_docs_site.py \
+		doc/site/hooks.py .github/scripts/pr_body.py
 
-# The coverage report is produced beside the run that measured it: the data
-# file never leaves the container, so regenerating it later would be a lie.
-test: toolbox-image
+test: dev-venv
 	@mkdir -p $(ARTIFACTS)
-	@$(BOX_ARCHIVE) | $(PODMAN) run $(BOX_CONFINE) \
-		--env BOX_EXPORT="coverage.xml $(COVERAGE_REPORT) $(COVERAGE_TOTAL)" \
-		$(TOOLBOX_TAG) sh -ceu 'status=0; python -m pytest || status=$$?; \
-			python -m coverage report --format=markdown > $(COVERAGE_REPORT); \
-			python -m coverage report --format=total > $(COVERAGE_TOTAL); \
-			exit $$status' \
-		| tar --extract --file=- --directory=$(ARTIFACTS) --no-same-owner
+	@$(DEV_PYTHON) -m pytest
+	@$(DEV_PYTHON) -m coverage report --format=markdown \
+		> $(ARTIFACTS)/$(COVERAGE_REPORT)
+	@$(DEV_PYTHON) -m coverage report --format=total \
+		> $(ARTIFACTS)/$(COVERAGE_TOTAL)
+	@cp -- coverage.xml $(ARTIFACTS)/coverage.xml
 
-# Composed here rather than in the container, so the report stays a plain table
-# on the inside and the framing lives with the threshold that defines it.
+host-tests: dev-venv
+	@$(DEV_PYTHON) -m pytest -m host --no-cov
+
+package: dev-venv
+	@if [[ -e '$(ARTIFACTS)/dist' ]]; then \
+		find '$(ARTIFACTS)/dist' -depth -delete; \
+	fi
+	@if [[ -e '$(ARTIFACTS)/package-install' ]]; then \
+		find '$(ARTIFACTS)/package-install' -depth -delete; \
+	fi
+	@mkdir -p '$(ARTIFACTS)/dist' '$(ARTIFACTS)/package-install'
+	@$(DEV_PYTHON) -m build --no-isolation --wheel --sdist \
+		--outdir '$(ARTIFACTS)/dist' .
+	@mapfile -t wheels < <(find '$(ARTIFACTS)/dist' -maxdepth 1 \
+		-type f -name '*.whl' -print); \
+		mapfile -t sdists < <(find '$(ARTIFACTS)/dist' -maxdepth 1 \
+		-type f -name '*.tar.gz' -print); \
+		[[ $${#wheels[@]} -eq 1 && $${#sdists[@]} -eq 1 ]] || { \
+			printf 'expected exactly one wheel and one sdist\n' >&2; exit 1; \
+		}; \
+		'$(DEV_PYTHON)' -m pip install --quiet --no-deps \
+			--target '$(ARTIFACTS)/package-install' "$${wheels[0]}"; \
+		install_root=$$(realpath '$(ARTIFACTS)/package-install'); \
+		entry_point="$$install_root/bin/remote-ssh-mcp"; \
+		test -x "$$entry_point"; \
+		cd /tmp; \
+		PYTHONPATH="$$install_root" '$(CURDIR)/$(DEV_PYTHON)' -c \
+			'import pathlib, remote_ssh_mcp; assert pathlib.Path(remote_ssh_mcp.__file__).is_relative_to(pathlib.Path("'"$$install_root"'"))'; \
+		EXPECTED_ROOT='$(CURDIR)' PYTHONPATH="$$install_root" \
+			'$(CURDIR)/$(DEV_PYTHON)' -c \
+			'import os, pathlib; from remote_ssh_mcp.config import runtime_repository_root; assert runtime_repository_root() == pathlib.Path(os.environ["EXPECTED_ROOT"]).resolve()'; \
+		PYTHONPATH="$$install_root" "$$entry_point" --help >/dev/null; \
+		if PYTHONPATH="$$install_root" "$$entry_point" --connect-timeout 0 \
+			>"$$install_root/operational.stdout" \
+			2>"$$install_root/operational.stderr"; then \
+			printf 'invalid operational probe unexpectedly passed\n' >&2; exit 1; \
+		fi; \
+		grep -F 'connect timeout must be between' \
+			"$$install_root/operational.stderr" >/dev/null; \
+		cd '$(CURDIR)'; \
+		for path in build remote_ssh_mcp.egg-info; do \
+			if [[ -e "$$path" ]]; then find "$$path" -depth -delete; fi; \
+		done
+
+standalone: standalone-venv
+	@arch=$$($(STANDALONE_PYTHON) -c \
+		'from tools.build_standalone import standalone_architecture; print(standalone_architecture())'); \
+	requested='$(STANDALONE_ARCH)'; \
+	if [[ -n "$$requested" && "$$requested" != "$$arch" ]]; then \
+		printf 'Native architecture %s does not match STANDALONE_ARCH=%s\n' \
+			"$$arch" "$$requested" >&2; exit 1; \
+	fi; \
+	$(STANDALONE_PYTHON) tools/build_standalone.py \
+		--python '$(STANDALONE_PYTHON)' --output dist \
+		--epoch '$(NORMALIZATION_EPOCH)' --expected-architecture "$$arch"; \
+	$(SYSTEM_PYTHON) tools/verify_standalone.py \
+		"dist/remote-ssh-mcp-linux-$$arch" \
+		--provenance "$(ARTIFACTS)/standalone-provenance-$$arch.json" \
+		--architecture "$$arch" --epoch '$(NORMALIZATION_EPOCH)'
+
+smoke-standalone: standalone
+	@arch=$$($(STANDALONE_PYTHON) -c \
+		'from tools.build_standalone import standalone_architecture; print(standalone_architecture())'); \
+	$(SYSTEM_PYTHON) tools/smoke_standalone.py \
+		"dist/remote-ssh-mcp-linux-$$arch"
+
+checksums:
+	@$(SYSTEM_PYTHON) tools/checksums.py --directory dist
+
+test-network-block: toolbox-image
+	$(BOX_RUN) python -c 'import socket; sock = socket.socket(); \
+		sock.settimeout(0.2); raise SystemExit(sock.connect_ex(("1.1.1.1", 443)) == 0)'
+
+confinement-test: toolbox-image
+	$(BOX_RUN) sh -ceu 'test "$$(id -u)" -ne 0; \
+		grep -Eq "^CapEff:[[:space:]]+0+$$" /proc/self/status; \
+		grep -Eq "^NoNewPrivs:[[:space:]]+1$$" /proc/self/status; \
+		grep -Eq "^Seccomp:[[:space:]]+2$$" /proc/self/status; \
+		test ! -e .git; test ! -S /run/podman/podman.sock; \
+		test ! -S /var/run/docker.sock; \
+		test -z "$${SSH_AUTH_SOCK:-}"; test -z "$${GITHUB_TOKEN:-}"; \
+		test -z "$${GH_TOKEN:-}"; test -z "$${CONTAINER_HOST:-}"; \
+		test -z "$${DOCKER_HOST:-}"; \
+		! touch /etc/remote-ssh-mcp-toolbox-write 2>/dev/null; \
+		touch /tmp/toolbox-write /work/toolbox-write; \
+		touch remote_ssh_mcp/.container-mutation'
+	@test ! -e remote_ssh_mcp/.container-mutation
+
 coverage-report:
 	@if [[ ! -f $(ARTIFACTS)/$(COVERAGE_TOTAL) ]]; then \
-		printf '%s\n' 'No coverage data; run make test first.' >&2; \
-		exit 1; \
+		printf '%s\n' 'No coverage data; run make test first.' >&2; exit 1; \
 	fi
 	@total=$$(cat -- $(ARTIFACTS)/$(COVERAGE_TOTAL)); \
-		threshold='$(COVERAGE_THRESHOLD)'; \
-		verdict=$$(awk -v total="$$total" -v threshold="$$threshold" \
-			'BEGIN { print (total + 0 >= threshold + 0) ? "above" : "below" }'); \
-		printf '### Coverage: %s%% (threshold %s%%, %s)\n\n' \
-			"$$total" "$$threshold" "$$verdict"; \
-		printf '%s\n\n' \
-			'<details><summary>Per-file coverage, fully covered files hidden</summary>'; \
-		cat -- $(ARTIFACTS)/$(COVERAGE_REPORT); \
-		printf '\n%s\n' '</details>'
+		threshold=$$($(SYSTEM_PYTHON) -c \
+			'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["tool"]["coverage"]["report"]["fail_under"])'); \
+		printf '### Coverage: %s%% (threshold %s%%)\n\n' \
+			"$$total" "$$threshold"; \
+		cat -- $(ARTIFACTS)/$(COVERAGE_REPORT)
 
-syntax: toolbox-image
-	$(BOX_RUN) sh -ceu 'python -m compileall -q remote_ssh_mcp \
-		remote-ssh-mcp.py tests/live_harness.py tests/live_support \
-		tests/live_podman_e2e.py; \
-		bash -n $(SHELL_FILES)'
+syntax:
+	@$(SYSTEM_PYTHON) -m compileall -q $(SOURCES)
+	@bash -n $(SHELL_FILES)
 
-# The toolbox carries ShellCheck, so this can no longer be skipped silently.
 shellcheck: toolbox-image
 	$(BOX_RUN) shellcheck $(SHELL_FILES)
 
-check: lint typecheck bandit test syntax shellcheck freeze-check
+version-check:
+	@$(SYSTEM_PYTHON) .github/scripts/version.py check $(VERSION_ARGS)
+
+version-sync:
+	@$(SYSTEM_PYTHON) .github/scripts/version.py sync
+
+release-notes:
+	@mkdir -p $(ARTIFACTS)
+	@$(SYSTEM_PYTHON) .github/scripts/version.py notes --output $(RELEASE_NOTES)
+
+dependency-snapshot:
+	@mkdir -p $(ARTIFACTS)
+	@$(SYSTEM_PYTHON) .github/scripts/dependency_snapshot.py \
+		--output $(DEPENDENCY_SNAPSHOT)
+
+compatibility-python: compatibility-image
+	@mkdir -p $(ARTIFACTS)/compatibility
+	@$(BOX_ARCHIVE) | $(PODMAN) run $(COMPATIBILITY_ONLINE) \
+		--env BOX_EXPORT="$(ARTIFACTS)/compatibility/python313-resolved.txt" \
+		--env BOX_EXPORT_ON_SUCCESS=1 $(COMPATIBILITY_TAG) sh -ceu \
+		'mkdir -p $(ARTIFACTS)/compatibility; \
+		python -m piptools compile $(COMPILE) --extra=dev \
+			--output-file=$(ARTIFACTS)/compatibility/python313-resolved.txt \
+			pyproject.toml; \
+		python -m venv /tmp/python313-tests; \
+		/tmp/python313-tests/bin/python -m pip install --quiet --require-hashes \
+			--only-binary=:all: \
+			--requirement $(ARTIFACTS)/compatibility/python313-resolved.txt; \
+		/tmp/python313-tests/bin/python -m pip install --quiet --no-deps \
+			--editable .; \
+		/tmp/python313-tests/bin/python -m pip check; \
+		/tmp/python313-tests/bin/python -m pytest' | $(PAYLOAD_MERGE)
+
+audit: dev-venv
+	@$(DEV_PYTHON) .github/scripts/dependency_audit.py
+
+audit-raw: dev-venv
+	@$(DEV_PYTHON) -m pip_audit --local --strict
+
+licenses: runtime-venv dev-venv lint-venv standalone-venv docs-venv
+	@$(DEV_PYTHON) .github/scripts/license_policy.py
+
+outdated: dev-venv
+	@$(DEV_PYTHON) -m pip list --outdated
+
+validator-image-actionlint:
+	@$(PODMAN) image exists '$(ACTIONLINT_TAG)' || { \
+		printf 'building %s\n' '$(ACTIONLINT_TAG)' >&2; \
+		$(BOX_ARCHIVE) | $(PODMAN) build --quiet --pull=missing \
+			--build-arg ACTIONLINT_IMAGE='$(ACTIONLINT_IMAGE)' \
+			--tag '$(ACTIONLINT_TAG)' \
+			--file containers/actionlint/Containerfile - >/dev/null; \
+	}
+
+validate-actions: validator-image-actionlint
+	@$(BOX_ARCHIVE) | $(PODMAN) run $(BOX_CONFINE) $(ACTIONLINT_TAG) \
+		actionlint -no-color -config-file .github/actionlint.yaml \
+		.github/workflows/*.yml
+
+check: lint format-check type-check bandit test package docs-audit test-network-block \
+	confinement-test syntax shellcheck freeze-check dependency-snapshot \
+	version-check compatibility-python licenses validate-actions
 
 ci: check audit
 
 clean:
-	@find remote_ssh_mcp tests -type f -path '*/__pycache__/*' -delete
-	@find remote_ssh_mcp tests -depth -type d -name __pycache__ -empty -delete
-	@for path in .pytest_cache .ruff_cache __pycache__ build dist *.egg-info; do \
-		if [[ -d "$$path" ]]; then find "$$path" -depth -delete; fi; \
-	done
-	@for path in $(COVERAGE_DATA) coverage.xml coverage-report.md \
-		$(ARTIFACTS)/coverage.xml $(ARTIFACTS)/$(COVERAGE_REPORT) \
-		$(ARTIFACTS)/$(COVERAGE_TOTAL) $(ARTIFACTS)/pr-coverage.md; do \
-		if [[ -e "$$path" ]]; then unlink "$$path"; fi; \
+	@find remote_ssh_mcp tests tools doc/site .github/scripts -type f \
+		-path '*/__pycache__/*' -delete
+	@find remote_ssh_mcp tests tools doc/site .github/scripts -depth -type d \
+		-name __pycache__ -empty -delete
+	@for path in '$(RUNTIME_VENV)' '$(DEV_VENV)' '$(LINT_VENV)' \
+		'$(STANDALONE_VENV)' '$(DOCS_VENV)' \
+		.pytest_cache .ruff_cache .mypy_cache .coverage coverage.xml .artifacts \
+		__pycache__ build dist site remote_ssh_mcp.egg-info; do \
+		if [[ -e "$$path" ]]; then find "$$path" -depth -delete; fi; \
 	done

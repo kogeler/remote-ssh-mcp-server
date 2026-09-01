@@ -1,0 +1,79 @@
+site_name: Remote SSH MCP
+site_description: >-
+  Bounded remote-machine tools for MCP clients over one explicitly owned
+  OpenSSH master.
+site_url: https://kogeler.github.io/remote-ssh-mcp-server/
+site_author: kogeler
+copyright: Copyright 2026 kogeler. MIT licensed.
+
+repo_url: https://github.com/kogeler/remote-ssh-mcp-server
+repo_name: kogeler/remote-ssh-mcp-server
+edit_uri: edit/main/doc/
+
+docs_dir: doc
+site_dir: site
+
+theme:
+  name: material
+  language: en
+  font: false
+  icon:
+    repo: fontawesome/brands/github
+  features:
+    - navigation.footer
+    - navigation.indexes
+    - navigation.sections
+    - navigation.top
+    - content.action.edit
+    - content.code.copy
+    - search.highlight
+    - search.suggest
+
+plugins:
+  - search
+
+hooks:
+  - doc/site/hooks.py
+
+exclude_docs: |
+  site/hooks.py
+  site/llms.txt
+  site/robots.txt
+  site/__pycache__/**
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/kogeler/remote-ssh-mcp-server
+      name: Remote SSH MCP on GitHub
+  generator: false
+
+nav:
+  - Home: README.md
+  - Users:
+      - Getting started: getting-started.md
+      - MCP tools: tools.md
+      - Security model: security.md
+  - Design:
+      - Architecture: architecture.md
+  - Contributors:
+      - Development: development.md
+      - Contributing: contributing.md
+  - Maintainers:
+      - Contract index: maintenance/README.md
+      - Development contract: maintenance/development.md
+      - Dependency contract: maintenance/dependencies.md
+      - CI contract: maintenance/ci.md
+      - Compatibility and security: maintenance/compatibility-security.md
+      - Release contract: maintenance/releases.md
+  - Changelog: https://github.com/kogeler/remote-ssh-mcp-server/blob/main/CHANGELOG.md

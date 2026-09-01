@@ -6,25 +6,14 @@
 #
 # The base image is pinned by digest so a run is reproducible and Dependabot
 # can propose the update explicitly. Never replace the digest with a tag.
-FROM docker.io/library/debian:13-slim@sha256:38a76d01668772e381ad2826d876627c89e7133e2f8a0f5d567306798b0f2a16
+FROM docker.io/library/debian:13-slim@sha256:38a76d01668772e381ad2826d876627c89e7133e2f8a0f5d567306798b0f2a16 AS live-target
 
-RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install --yes \
-        --no-install-recommends \
-        iproute2 \
-        openssh-server \
-        procps \
-        rsync \
-        sudo \
-    && rm -rf /var/lib/apt/lists/*
+COPY remote_ssh_mcp/containers/live-target/install-base.sh /usr/local/sbin/install-live-target
+RUN /bin/bash /usr/local/sbin/install-live-target \
+    && rm -f /usr/local/sbin/install-live-target
 
-# The unprivileged account the tests authenticate as. Its sudo policy is not
-# baked in: every case installs the policy it needs at runtime.
-RUN useradd --create-home --shell /bin/bash mcp-test \
-    && install -d -m 0700 -o mcp-test -g mcp-test /home/mcp-test/.ssh
-
-COPY sshd.conf /etc/ssh/sshd_config.d/99-remote-ssh-mcp-e2e.conf
-COPY entrypoint.sh /usr/local/sbin/remote-ssh-mcp-e2e-entrypoint
+COPY remote_ssh_mcp/containers/live-target/sshd.conf /etc/ssh/sshd_config.d/99-remote-ssh-mcp-e2e.conf
+COPY remote_ssh_mcp/containers/live-target/entrypoint.sh /usr/local/sbin/remote-ssh-mcp-e2e-entrypoint
 
 RUN chmod 0644 /etc/ssh/sshd_config.d/99-remote-ssh-mcp-e2e.conf \
     && chmod 0755 /usr/local/sbin/remote-ssh-mcp-e2e-entrypoint \

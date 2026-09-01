@@ -1,24 +1,8 @@
-"""Stable internal errors shared by the command and transfer layers."""
+# Copyright (c) 2026 kogeler
+# SPDX-License-Identifier: MIT
 
-from __future__ import annotations
+"""Stable internal errors shared by the MCP application layers."""
 
-from dataclasses import dataclass, field
-from typing import Any
+from ssh_wrapper.errors import SSHError as RemoteMCPError
 
-
-@dataclass(slots=True)
-class RemoteMCPError(Exception):
-    """An expected failure with a stable machine-readable identifier."""
-
-    code: str
-    message: str
-    details: dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        Exception.__init__(self, self.message)
-
-    def to_dict(self) -> dict[str, Any]:
-        result: dict[str, Any] = {"error": self.code, "message": self.message}
-        if self.details:
-            result["details"] = self.details
-        return result
+__all__ = ["RemoteMCPError"]
