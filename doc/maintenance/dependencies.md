@@ -47,7 +47,10 @@ hashes, and no source directory is added to `PYTHONPATH`.
 
 Use `make lock` after changing direct dependencies and
 `make refresh-dependencies` for a deliberate whole-tree upgrade. Review every
-changed pin and hash. `make freeze-check` reproduces the locks;
+changed pin and hash. Dependabot updates one grouped Python graph and must not
+ignore a transitive package: excluding one side of an exact direct/transitive
+pair can produce uninstallable locks. Its pull request must install and
+reproduce all five locks before it can merge. `make freeze-check` reproduces the locks;
 `make dependency-snapshot` renders their exact dependency graph;
 `make audit` enforces the reviewed vulnerability exceptions in
 `.github/dependency-audit-exceptions.json`. Exceptions must identify one

@@ -3,6 +3,13 @@
 All notable Remote SSH MCP changes are recorded here. Changes to the external
 SSH transport library have their own changelog.
 
+## Unreleased
+
+### Changed
+
+- Kept transitive packages inside Dependabot's grouped Python updates so an
+  exact direct dependency cannot be paired with an incompatible stale pin.
+
 ## 0.2.0 - 2026-08-29
 
 ### Changed
