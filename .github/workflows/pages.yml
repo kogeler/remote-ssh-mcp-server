@@ -10,6 +10,8 @@ on:
       - "doc/**"
       - "mkdocs.yml"
       - "pyproject.toml"
+      - "requirements.in"
+      - "requirements-docs.in"
       - "requirements-docs.txt"
       - "tools/audit_docs_site.py"
       - "tests/test_docs_site_audit.py"
@@ -22,6 +24,8 @@ on:
       - "doc/**"
       - "mkdocs.yml"
       - "pyproject.toml"
+      - "requirements.in"
+      - "requirements-docs.in"
       - "requirements-docs.txt"
       - "tools/audit_docs_site.py"
       - "tests/test_docs_site_audit.py"
@@ -51,7 +55,10 @@ jobs:
         with:
           python-version: "3.14"
           cache: pip
-          cache-dependency-path: requirements-docs.txt
+          cache-dependency-path: |
+            requirements.in
+            requirements-docs.in
+            requirements-docs.txt
       - name: Build current documentation and validate every local route
         run: make docs-audit SYSTEM_PYTHON=python
       - name: Preserve the rendered Pages artifact

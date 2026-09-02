@@ -92,11 +92,11 @@ part of CI or another aggregate target.
 
 ## Dependencies And Documentation
 
-Direct runtime, development, standalone, and documentation pins belong in
-`pyproject.toml`; Ruff belongs in `tools/lint/pyproject.toml`. Run `make lock`
-and review all five generated locks after a direct dependency change. Do not
-hand-edit a lock or add a dependency when a small standard-library
-implementation suffices.
+Direct pins belong in the matching `requirements*.in` file. The development,
+standalone, and documentation inputs extend `requirements.in`; the lint input
+is independent. Run `make lock` and review all five generated `.txt` locks
+after a direct dependency change. Do not hand-edit a lock or add a dependency
+when a small standard-library implementation suffices.
 
 Documentation is part of the same atomic change. Synchronize CLI options,
 tools, schemas, limits, annotations, errors, security behavior, examples, and

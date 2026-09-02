@@ -26,9 +26,9 @@ FROM base AS lock
 # generates itself. Pin its complete wheel-only tree explicitly so rebuilding a
 # content-addressed tag at a later date cannot select different resolver code.
 RUN python -m pip install --quiet --only-binary=:all: \
-        pip==26.2.1 \
+        pip==26.1.1 \
         setuptools==84.0.0 \
-        pip-tools==7.6.1 \
+        pip-tools==7.5.3 \
         build==1.5.0 \
         click==8.4.2 \
         packaging==26.3 \

@@ -81,7 +81,17 @@ def test_project_contains_no_legacy_core_residue() -> None:
         "dist",
     }
     ignored_prefixes = ("venv-",)
-    text_suffixes = {"", ".json", ".md", ".py", ".sh", ".toml", ".txt", ".yml"}
+    text_suffixes = {
+        "",
+        ".in",
+        ".json",
+        ".md",
+        ".py",
+        ".sh",
+        ".toml",
+        ".txt",
+        ".yml",
+    }
 
     for path in ROOT.rglob("*"):
         relative = path.relative_to(ROOT)
@@ -115,10 +125,15 @@ def test_repository_contains_only_the_mcp_product_tree() -> None:
         "remote-ssh-mcp",
         "remote-ssh-mcp.py",
         "remote_ssh_mcp",
+        "requirements-dev.in",
         "requirements-dev.txt",
+        "requirements-docs.in",
         "requirements-docs.txt",
+        "requirements-lint.in",
         "requirements-lint.txt",
+        "requirements-standalone.in",
         "requirements-standalone.txt",
+        "requirements.in",
         "requirements.txt",
         "ruff.toml",
         "tests",

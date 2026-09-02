@@ -16,12 +16,16 @@ STANDALONE_PYTHON := $(STANDALONE_VENV)/bin/python
 DOCS_PYTHON := $(DOCS_VENV)/bin/python
 RUFF := $(LINT_VENV)/bin/ruff
 MKDOCS := $(DOCS_VENV)/bin/mkdocs
+RUNTIME_INPUT := requirements.in
+DEVELOPMENT_INPUT := requirements-dev.in
+LINT_INPUT := requirements-lint.in
+STANDALONE_INPUT := requirements-standalone.in
+DOCS_INPUT := requirements-docs.in
 RUNTIME_LOCK := requirements.txt
 DEVELOPMENT_LOCK := requirements-dev.txt
 LINT_LOCK := requirements-lint.txt
 STANDALONE_LOCK := requirements-standalone.txt
 DOCS_LOCK := requirements-docs.txt
-LINT_PROJECT := tools/lint/pyproject.toml
 COMPILE := --quiet --strip-extras --allow-unsafe --generate-hashes \
 	--no-emit-find-links --rebuild
 LOCK_UPGRADE ?=
@@ -146,15 +150,15 @@ lock: lock-image
 		--env BOX_EXPORT="$(RUNTIME_LOCK) $(DEVELOPMENT_LOCK) $(LINT_LOCK) $(STANDALONE_LOCK) $(DOCS_LOCK)" \
 		--env BOX_EXPORT_ON_SUCCESS=1 $(LOCK_TAG) sh -ceu \
 		'python -m piptools compile $(COMPILE) $(LOCK_UPGRADE) \
-			--output-file=$(RUNTIME_LOCK) pyproject.toml; \
+			--output-file=$(RUNTIME_LOCK) $(RUNTIME_INPUT); \
 		python -m piptools compile $(COMPILE) $(LOCK_UPGRADE) \
-			--extra=dev --output-file=$(DEVELOPMENT_LOCK) pyproject.toml; \
+			--output-file=$(DEVELOPMENT_LOCK) $(DEVELOPMENT_INPUT); \
 		python -m piptools compile $(COMPILE) $(LOCK_UPGRADE) \
-			--output-file=$(LINT_LOCK) $(LINT_PROJECT); \
+			--output-file=$(LINT_LOCK) $(LINT_INPUT); \
 		python -m piptools compile $(COMPILE) $(LOCK_UPGRADE) \
-			--extra=standalone --output-file=$(STANDALONE_LOCK) pyproject.toml; \
+			--output-file=$(STANDALONE_LOCK) $(STANDALONE_INPUT); \
 		python -m piptools compile $(COMPILE) $(LOCK_UPGRADE) \
-			--extra=docs --output-file=$(DOCS_LOCK) pyproject.toml; \
+			--output-file=$(DOCS_LOCK) $(DOCS_INPUT); \
 		chmod 0644 $(RUNTIME_LOCK) $(DEVELOPMENT_LOCK) $(LINT_LOCK) \
 			$(STANDALONE_LOCK) $(DOCS_LOCK)' \
 		| $(PAYLOAD_MERGE)
@@ -170,19 +174,19 @@ freeze-check: lock-image
 	@$(BOX_ARCHIVE) | $(PODMAN) run $(LOCK_ONLINE) $(LOCK_TAG) bash -ceu \
 		'python -m piptools compile $(COMPILE) \
 			--constraint=$(RUNTIME_LOCK) --output-file=/tmp/runtime.txt \
-			pyproject.toml; \
-		python -m piptools compile $(COMPILE) --extra=dev \
+			$(RUNTIME_INPUT); \
+		python -m piptools compile $(COMPILE) \
 			--constraint=$(DEVELOPMENT_LOCK) \
-			--output-file=/tmp/development.txt pyproject.toml; \
+			--output-file=/tmp/development.txt $(DEVELOPMENT_INPUT); \
 		python -m piptools compile $(COMPILE) \
 			--constraint=$(LINT_LOCK) --output-file=/tmp/lint.txt \
-			$(LINT_PROJECT); \
-		python -m piptools compile $(COMPILE) --extra=standalone \
+			$(LINT_INPUT); \
+		python -m piptools compile $(COMPILE) \
 			--constraint=$(STANDALONE_LOCK) \
-			--output-file=/tmp/standalone.txt pyproject.toml; \
-		python -m piptools compile $(COMPILE) --extra=docs \
+			--output-file=/tmp/standalone.txt $(STANDALONE_INPUT); \
+		python -m piptools compile $(COMPILE) \
 			--constraint=$(DOCS_LOCK) \
-			--output-file=/tmp/docs.txt pyproject.toml; \
+			--output-file=/tmp/docs.txt $(DOCS_INPUT); \
 		diff -u <(sed "/^[[:space:]]*#/d" $(RUNTIME_LOCK)) \
 			<(sed "/^[[:space:]]*#/d" /tmp/runtime.txt); \
 		diff -u <(sed "/^[[:space:]]*#/d" $(DEVELOPMENT_LOCK)) \
@@ -382,9 +386,9 @@ compatibility-python: compatibility-image
 		--env BOX_EXPORT="$(ARTIFACTS)/compatibility/python313-resolved.txt" \
 		--env BOX_EXPORT_ON_SUCCESS=1 $(COMPATIBILITY_TAG) sh -ceu \
 		'mkdir -p $(ARTIFACTS)/compatibility; \
-		python -m piptools compile $(COMPILE) --extra=dev \
+		python -m piptools compile $(COMPILE) \
 			--output-file=$(ARTIFACTS)/compatibility/python313-resolved.txt \
-			pyproject.toml; \
+			$(DEVELOPMENT_INPUT); \
 		python -m venv /tmp/python313-tests; \
 		/tmp/python313-tests/bin/python -m pip install --quiet --require-hashes \
 			--only-binary=:all: \

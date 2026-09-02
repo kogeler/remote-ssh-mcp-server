@@ -9,7 +9,6 @@ import json
 import shutil
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
@@ -20,6 +19,13 @@ LOCKS = (
     "requirements-docs.txt",
     "requirements-lint.txt",
     "requirements-standalone.txt",
+)
+INPUTS = (
+    "requirements.in",
+    "requirements-dev.in",
+    "requirements-docs.in",
+    "requirements-lint.in",
+    "requirements-standalone.in",
 )
 
 
@@ -41,41 +47,40 @@ def _run_snapshot(root: Path, output: Path) -> subprocess.CompletedProcess[str]:
 
 
 def _copy_inputs(destination: Path) -> None:
-    """Copy only the five authoritative dependency inputs."""
-    (destination / "tools/lint").mkdir(parents=True)
+    """Copy the package link, five inputs, and five generated locks."""
     shutil.copy2(ROOT / "pyproject.toml", destination / "pyproject.toml")
-    shutil.copy2(
-        ROOT / "tools/lint/pyproject.toml",
-        destination / "tools/lint/pyproject.toml",
-    )
-    for lock in LOCKS:
-        shutil.copy2(ROOT / lock, destination / lock)
+    for name in INPUTS + LOCKS:
+        shutil.copy2(ROOT / name, destination / name)
 
 
 def _replace_runtime_dependency(path: Path, replacement: str) -> tuple[str, str]:
     """Replace the first direct runtime pin without knowing its current version."""
-    content = path.read_text(encoding="utf-8")
-    document = tomllib.loads(content)
-    dependencies = document["project"]["dependencies"]
-    assert isinstance(dependencies, list) and dependencies
-    current = dependencies[0]
-    assert isinstance(current, str) and "==" in current
+    lines = path.read_text(encoding="utf-8").splitlines()
+    index = next(
+        index
+        for index, line in enumerate(lines)
+        if line and not line.startswith(("#", "-r "))
+    )
+    current = lines[index]
+    assert "==" in current
     name, version = current.split("==", maxsplit=1)
-    updated = content.replace(f'    "{current}",', f'    "{replacement}",', 1)
-    assert updated != content
-    path.write_text(updated, encoding="utf-8")
+    lines[index] = replacement
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return name, version
 
 
 def _direct_lint_requirement() -> tuple[str, str]:
     """Read the lint package identity from its sole version authority."""
-    document = tomllib.loads(
-        (ROOT / "tools/lint/pyproject.toml").read_text(encoding="utf-8")
-    )
-    dependencies = document["project"]["dependencies"]
-    assert isinstance(dependencies, list) and len(dependencies) == 1
-    requirement = dependencies[0]
-    assert isinstance(requirement, str) and "==" in requirement
+    requirements = [
+        line
+        for line in (ROOT / "requirements-lint.in")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line and not line.startswith("#")
+    ]
+    assert len(requirements) == 1
+    requirement = requirements[0]
+    assert "==" in requirement
     name, version = requirement.split("==", maxsplit=1)
     return name, version
 
@@ -161,8 +166,8 @@ def test_snapshot_rejects_unrecognized_lock_content(tmp_path: Path) -> None:
 def test_snapshot_rejects_missing_direct_dependency(tmp_path: Path) -> None:
     """Every direct dependency must occur in its matching lock."""
     _copy_inputs(tmp_path)
-    project = tmp_path / "pyproject.toml"
-    _replace_runtime_dependency(project, "missing-package==1.0.0")
+    runtime_input = tmp_path / "requirements.in"
+    _replace_runtime_dependency(runtime_input, "missing-package==1.0.0")
 
     result = _run_snapshot(tmp_path, tmp_path / "snapshot.json")
 
@@ -173,10 +178,12 @@ def test_snapshot_rejects_missing_direct_dependency(tmp_path: Path) -> None:
 def test_snapshot_rejects_direct_version_mismatch(tmp_path: Path) -> None:
     """A direct version cannot disagree with its generated lock."""
     _copy_inputs(tmp_path)
-    project = tmp_path / "pyproject.toml"
-    name, locked_version = _replace_runtime_dependency(project, "placeholder==0.0.0")
+    runtime_input = tmp_path / "requirements.in"
+    name, locked_version = _replace_runtime_dependency(
+        runtime_input, "placeholder==0.0.0"
+    )
     replacement_version = "0.0.1" if locked_version == "0.0.0" else "0.0.0"
-    _replace_runtime_dependency(project, f"{name}=={replacement_version}")
+    _replace_runtime_dependency(runtime_input, f"{name}=={replacement_version}")
 
     result = _run_snapshot(tmp_path, tmp_path / "snapshot.json")
 
@@ -220,20 +227,18 @@ def test_snapshot_rejects_duplicate_hash(tmp_path: Path) -> None:
     assert "duplicate SHA-256 hash" in result.stderr
 
 
-def test_snapshot_rejects_another_optional_dependency_group(tmp_path: Path) -> None:
-    """The four supported audiences cannot expand without policy review."""
+def test_snapshot_rejects_another_requirements_include(tmp_path: Path) -> None:
+    """A derived audience can include only the canonical runtime input."""
     _copy_inputs(tmp_path)
-    project = tmp_path / "pyproject.toml"
-    project.write_text(
-        project.read_text(encoding="utf-8")
-        + '\n[project.optional-dependencies.extra]\nextra = ["example==1.0.0"]\n',
+    development_input = tmp_path / "requirements-dev.in"
+    development_input.write_text(
+        development_input.read_text(encoding="utf-8").replace(
+            "-r requirements.in", "-r unexpected.in"
+        ),
         encoding="utf-8",
     )
 
     result = _run_snapshot(tmp_path, tmp_path / "snapshot.json")
 
     assert result.returncode == 1
-    assert (
-        "expected exactly dev, docs, and standalone optional dependency groups"
-        in result.stderr
-    )
+    assert "must include exactly '-r requirements.in' once" in result.stderr

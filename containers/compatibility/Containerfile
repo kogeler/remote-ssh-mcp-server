@@ -23,9 +23,9 @@ RUN useradd --create-home --uid 1000 --shell /bin/bash box \
 # This environment resolves a disposable graph, so it carries the same exact
 # wheel-only self-hosting resolver tree as the ordinary lock image.
 RUN python -m pip install --quiet --only-binary=:all: \
-        pip==26.2.1 \
+        pip==26.1.1 \
         setuptools==84.0.0 \
-        pip-tools==7.6.1 \
+        pip-tools==7.5.3 \
         build==1.5.0 \
         click==8.4.2 \
         packaging==26.3 \

@@ -17,11 +17,15 @@ tree. The SSH runtime library is the exact published
 - `containers/`, `make/`, and `tools/container_payload.py` own the autonomous
   development images, disposable SSH target, live recipes, and pipe transport.
 - `doc/` contains all public and maintainer documentation for this project.
-- `pyproject.toml` owns project metadata, direct dependencies, typing, security
-  scanning, and coverage policy.
+- `pyproject.toml` owns project metadata, typing, security scanning, and
+  coverage policy. Published runtime metadata reads `requirements.in`
+  dynamically and must not duplicate its versions.
+- `requirements.in`, `requirements-dev.in`, `requirements-lint.in`,
+  `requirements-standalone.in`, and `requirements-docs.in` own exact direct
+  dependency versions and are the native Dependabot inputs.
 - `requirements.txt`, `requirements-dev.txt`, `requirements-lint.txt`,
   `requirements-standalone.txt`, and `requirements-docs.txt` are generated
-  hash locks. Never edit them by hand.
+  hash locks paired with those inputs. Never edit them by hand.
 - `tools/*standalone*.py` owns native Linux executable build, provenance,
   validation, and smoke behavior. `tools/checksums.py` owns its release
   inventory.
@@ -53,6 +57,9 @@ tree. The SSH runtime library is the exact published
 - Keep all documentation and client examples synchronized with public schemas.
 - Runtime and tests install `ssh-wrapper` from PyPI through the canonical hash
   locks; never add an alternate source path or editable dependency install.
+- Dependabot updates only the five `requirements*.in` inputs and their matching
+  pip-compile locks. Keep `pyproject.toml` excluded from its pip manifests and
+  keep the local pip-tools bootstrap aligned with Dependabot's resolver.
 - The launcher uses Python isolated mode for its import probe and entry point;
   inherited `PYTHONPATH` or user-site packages cannot select runtime code.
 - The prepared runtime is bound to both `requirements.txt` and `.version`.
@@ -86,10 +93,10 @@ make format
 make check
 ```
 
-After changing direct dependencies, run `make lock` and review all five
-generated locks. Use `make refresh-dependencies` only for an intentional
-whole-tree upgrade. Released-product changes require `.version`, its mirrors,
-and one matching dated `CHANGELOG.md` section.
+After changing a direct dependency in `requirements*.in`, run `make lock` and
+review all five generated locks. Use `make refresh-dependencies` only for an
+intentional whole-tree upgrade. Released-product changes require `.version`,
+its mirrors, and one matching dated `CHANGELOG.md` section.
 
 Never use a real SSH identity in unit tests. Do not commit or push unless the
 operator explicitly requests the corresponding action.
