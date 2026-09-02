@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools==84.0.0"]
+requires = ["setuptools>=84"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -10,38 +10,16 @@ readme = "README.md"
 requires-python = ">=3.13,<3.15"
 license = "MIT"
 license-files = ["LICENSE"]
-dependencies = [
-    "mcp==2.0.0",
-    "pydantic==2.13.4",
-    "ssh-wrapper==0.1.0",
-]
-
-[project.optional-dependencies]
-dev = [
-    "bandit[toml]==1.9.4",
-    "build==1.5.0",
-    "mypy==2.3.1",
-    "packaging==26.3",
-    "pip-audit==2.10.1",
-    "pytest==9.1.1",
-    "pytest-asyncio==1.4.0",
-    "pytest-cov==7.1.0",
-    "pytest-xdist==3.8.0",
-    "pyyaml==6.0.3",
-    "setuptools==84.0.0",
-]
-standalone = [
-    "pyinstaller==6.22.2",
-]
-docs = [
-    "mkdocs-material==9.7.7",
-]
+dynamic = ["dependencies"]
 
 [project.scripts]
 remote-ssh-mcp = "remote_ssh_mcp.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["remote_ssh_mcp*"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.in"] }
 
 [tool.mypy]
 files = ["remote_ssh_mcp", "remote-ssh-mcp.py"]

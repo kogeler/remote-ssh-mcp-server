@@ -11,6 +11,8 @@ updates:
       time: "05:00"
       timezone: Etc/UTC
     open-pull-requests-limit: 5
+    exclude-paths:
+      - pyproject.toml
     groups:
       python:
         patterns:

@@ -7,8 +7,13 @@ SSH transport library have their own changelog.
 
 ### Changed
 
-- Kept transitive packages inside Dependabot's grouped Python updates so an
-  exact direct dependency cannot be paired with an incompatible stale pin.
+- Moved all exact direct Python versions to native
+  `requirements*.in`/`requirements*.txt` pip-compile pairs so Dependabot can
+  update each complete graph instead of treating `pyproject.toml` as a plain
+  requirements manifest.
+- Aligned both local lock resolvers with Dependabot's pip and pip-tools pair,
+  and made the published wheel derive its runtime metadata from
+  `requirements.in` without a second version authority.
 
 ## 0.2.0 - 2026-08-29
 

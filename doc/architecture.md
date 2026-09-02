@@ -142,6 +142,7 @@ tools/container_payload.py bounded deterministic pipe transport
 tools/*standalone*.py      native Linux build, provenance, verification, and smoke
 doc/                       project documentation and client examples
 pyproject.toml             package and validation policy
+requirements*.in           exact direct inputs managed by Dependabot
 requirements*.txt          generated runtime, development, lint, standalone, and docs locks
 Makefile                   supported local commands
 ```

@@ -1,0 +1,4 @@
+# Exact direct dependencies of the published runtime.
+mcp==2.0.0
+pydantic==2.13.4
+ssh-wrapper==0.1.0
