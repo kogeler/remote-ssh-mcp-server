@@ -1,2 +1,2 @@
 # The editor-friendly lint environment remains independent of the runtime.
-ruff==0.16.3
+ruff==0.16.5
