@@ -237,6 +237,49 @@ def test_active_workflows_are_complete_pinned_and_root_native() -> None:
     assert external_actions
 
 
+def test_ci_distinguishes_published_maintenance_from_unpublished_stasis() -> None:
+    workflow = _workflow_document("ci.yml")
+    triggers = workflow.get("on")
+    jobs = workflow.get("jobs")
+    assert isinstance(triggers, dict) and isinstance(jobs, dict)
+    workflow_call = triggers.get("workflow_call")
+    assert isinstance(workflow_call, dict)
+    inputs = workflow_call.get("inputs")
+    assert isinstance(inputs, dict)
+    base_ref = inputs.get("base_ref")
+    assert isinstance(base_ref, dict) and base_ref.get("default") == ""
+
+    version = jobs.get("version")
+    assert isinstance(version, dict)
+    assert "permissions" not in version
+    steps = version.get("steps")
+    assert isinstance(steps, list)
+    baseline = next(
+        step
+        for step in steps
+        if isinstance(step, dict) and step.get("id") == "baseline"
+    )
+    baseline_options = baseline.get("with")
+    assert isinstance(baseline_options, dict)
+    baseline_script = baseline_options.get("script")
+    assert isinstance(baseline_script, str)
+    assert "github.rest.repos.getReleaseByTag" in baseline_script
+    assert (
+        "publishedCurrent = currentRelease.data.tag_name === current" in baseline_script
+    )
+    assert 'core.setOutput("published_current_version"' in baseline_script
+    assert 'core.setOutput("unpublished_base_version"' in baseline_script
+
+    comparison = next(
+        step.get("run")
+        for step in steps
+        if isinstance(step, dict) and isinstance(step.get("run"), str)
+    )
+    assert 'if [[ "$current_version" != "$BASE_VERSION" ]]' in comparison
+    assert 'elif [[ "$PUBLISHED_CURRENT_VERSION" != "true" ]]' in comparison
+    assert "--unpublished-base-version $UNPUBLISHED_BASE_VERSION" in comparison
+
+
 def test_pr_body_is_the_only_pull_request_target_write_boundary() -> None:
     workflow_directory = ROOT / ".github/workflows"
     documents = {
@@ -383,9 +426,33 @@ def test_release_publishes_only_the_two_gated_executables_and_checksums() -> Non
     push = triggers.get("push")
     assert isinstance(push, dict)
     assert push.get("branches") == ["main"]
-    assert push.get("paths") == [".version"]
+    assert "paths" not in push
     jobs = workflow.get("jobs")
     assert isinstance(jobs, dict)
+
+    release_state = jobs.get("release-state")
+    assert isinstance(release_state, dict)
+    state_steps = release_state.get("steps")
+    assert isinstance(state_steps, list)
+    state_check = next(
+        step
+        for step in state_steps
+        if isinstance(step, dict) and step.get("id") == "check"
+    )
+    state_options = state_check.get("with")
+    assert isinstance(state_options, dict)
+    state_script = state_options.get("script")
+    assert isinstance(state_script, str)
+    assert "const readFile = async (path, ref = context.sha)" in state_script
+    assert "const published = Boolean(existing && !existing.draft)" in state_script
+    assert (
+        "const releaseCommit = published ? tag.data.object.sha : context.sha"
+        in state_script
+    )
+    assert 'await readFile(".version", releaseCommit)' in state_script
+    assert 'await readFile("CHANGELOG.md", releaseCommit)' in state_script
+    assert "existing.target_commitish !== releaseCommit" in state_script
+    assert 'core.setOutput("release_required", "false")' in state_script
 
     reusable_ci = [
         job
@@ -393,8 +460,13 @@ def test_release_publishes_only_the_two_gated_executables_and_checksums() -> Non
         if isinstance(job, dict) and job.get("uses") == "./.github/workflows/ci.yml"
     ]
     assert len(reusable_ci) == 1
+    assert reusable_ci[0].get("needs") == "release-state"
+    assert reusable_ci[0].get("if") == (
+        "needs.release-state.outputs.release_required == 'true'"
+    )
     inputs = reusable_ci[0].get("with")
     assert isinstance(inputs, dict)
+    assert inputs.get("base_ref") == "${{ github.event.before }}"
     assert inputs.get("upload_release_artifacts") == "true"
 
     publishing_jobs = [
@@ -405,6 +477,10 @@ def test_release_publishes_only_the_two_gated_executables_and_checksums() -> Non
         and job["permissions"].get("contents") == "write"
     ]
     assert len(publishing_jobs) == 1
+    assert publishing_jobs[0].get("needs") == ["release-state", "ci"]
+    assert publishing_jobs[0].get("if") == (
+        "needs.release-state.outputs.release_required == 'true'"
+    )
     downloads = [
         step
         for step in publishing_jobs[0].get("steps", [])

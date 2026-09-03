@@ -20,6 +20,10 @@ tree. The SSH runtime library is the exact published
 - `pyproject.toml` owns project metadata, typing, security scanning, and
   coverage policy. Published runtime metadata reads `requirements.in`
   dynamically and must not duplicate its versions.
+- `.version` is the only human-maintained version. Ordinary pull requests keep
+  its published value and accumulate release-worthy entries under
+  `CHANGELOG.md` `## Unreleased`; only deliberate release preparation advances
+  it and creates the matching dated section.
 - `requirements.in`, `requirements-dev.in`, `requirements-lint.in`,
   `requirements-standalone.in`, and `requirements-docs.in` own exact direct
   dependency versions and are the native Dependabot inputs.
@@ -73,7 +77,12 @@ tree. The SSH runtime library is the exact published
   smallest trusted job that requires it.
 - The privileged PR metadata workflow executes only trusted default-branch
   code. Pull-request `CHANGELOG.md` content is bounded inert input and may
-  replace only one marker-delimited body section.
+  replace only one marker-delimited body section. A populated `## Unreleased`
+  section is rendered without requiring a version change.
+- Release automation decides from exact external publication state. A complete
+  release for the current version is checked against its immutable tagged
+  source and skips reusable release CI and publication even after `main` and
+  `Unreleased` advance.
 - Documentation is rendered with the dedicated hash lock. After that locked
   environment is prepared, rendering and audit make no network requests;
   Pages deploys only from a trusted `main` push.

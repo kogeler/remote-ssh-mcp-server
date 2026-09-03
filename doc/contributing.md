@@ -120,15 +120,21 @@ commit SHAs. The pull-request workflow has read-only contents permission.
 Dependency submission and release run only on trusted direct pushes to `main`;
 write access stays confined to the individual job that needs it.
 
-Changing `CHANGELOG.md` triggers the dedicated PR metadata workflow. It copies
-the newest populated changelog section into a marker-delimited block in the
-pull-request body while preserving all manual text. Do not edit or duplicate
-the marker lines; edit the changelog source or write outside the managed block.
+Add release-worthy changes to the existing `## Unreleased` section in
+[`CHANGELOG.md`](../CHANGELOG.md). Keep `.version` unchanged in an ordinary
+pull request: multiple changes and multiple merged pull requests may
+accumulate before a maintainer deliberately prepares a release.
 
-For a released-product change, update `.version`, run `make version-sync`, and
-add one matching dated `CHANGELOG.md` section. Validate with
-`make version-check` and render the exact release body with
-`make release-notes`.
+Changing `CHANGELOG.md` triggers the dedicated PR metadata workflow. It copies
+the newest populated level-two section—normally `## Unreleased`, even when
+`.version` did not change—into a marker-delimited block in the pull-request
+body while preserving all manual text. Do not edit or duplicate the marker
+lines; edit the changelog source or write outside the managed block.
+
+Only deliberate release preparation advances `.version`: move the accumulated
+notes into one matching dated `CHANGELOG.md` section, retain the empty
+`## Unreleased` heading, and run `make version-sync`. Validate with
+`make version-check` and render the exact release body with `make release-notes`.
 
 Do not report a vulnerability in a public issue. Use private vulnerability
 reporting or contact the code owner. Include the affected version, crossed

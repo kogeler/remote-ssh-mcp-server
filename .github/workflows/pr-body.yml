@@ -2,6 +2,8 @@
 
 name: PR changelog body
 
+# Ordinary pull requests accumulate notes under Unreleased without a version bump.
+# Mirror that populated section whenever the proposed changelog changes.
 on:
   pull_request_target:
     branches:

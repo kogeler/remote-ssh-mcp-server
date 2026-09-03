@@ -14,6 +14,14 @@ SSH transport library have their own changelog.
 - Aligned both local lock resolvers with Dependabot's pip and pip-tools pair,
   and made the published wheel derive its runtime metadata from
   `requirements.in` without a second version authority.
+- Made ordinary CI accept maintenance at an already published version while
+  still requiring a new or unpublished version to advance beyond published
+  history.
+- Made every direct `main` push inspect exact release state, validate an
+  existing release against its immutable tagged source, and skip reusable CI
+  and publication when that release is already complete.
+- Clarified and regression-tested PR-body mirroring of a populated
+  `Unreleased` section without requiring a version change.
 
 ## 0.2.0 - 2026-08-29
 

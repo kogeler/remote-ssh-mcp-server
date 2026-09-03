@@ -43,6 +43,23 @@ def _run(tmp_path: Path, changelog: str, body: str = "") -> tuple[int, str, str]
     )
 
 
+def test_prefers_populated_unreleased_without_a_version_change(tmp_path: Path) -> None:
+    code, output, error = _run(
+        tmp_path,
+        (
+            "# Changelog\n\n## Unreleased\n\n### Changed\n\n- Pending change.\n\n"
+            "## 0.2.0 - 2026-08-29\n\n- Published change.\n"
+        ),
+        "Manual context.\n",
+    )
+
+    assert code == 0, error
+    assert output == (
+        f"Manual context.\n\n{START}\n## Unreleased\n\n### Changed\n\n"
+        f"- Pending change.\n{END}\n"
+    )
+
+
 def test_skips_empty_unreleased_and_preserves_manual_body(tmp_path: Path) -> None:
     code, output, error = _run(
         tmp_path,
