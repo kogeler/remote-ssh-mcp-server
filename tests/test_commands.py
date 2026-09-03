@@ -304,6 +304,52 @@ raise SystemExit(75)
 
 
 @pytest.mark.asyncio
+async def test_watcher_detaches_only_after_registration_and_arming(
+    command_stack, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner, _inspector, _master, _paths = command_stack
+    runtime = tmp_path / "remote-runtime"
+    runtime.mkdir()
+    marker = tmp_path / "watcher-detached-too-early"
+    checked = tmp_path / "watcher-detach-checked"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    real_setsid = shutil.which("setsid")
+    assert real_setsid is not None
+    fake_setsid = fake_bin / "setsid"
+    fake_setsid.write_text(
+        f"""#!/bin/sh
+set -eu
+if test "${{4-}}" = remote-ssh-mcp-watcher; then
+    if test -e "$7" || test -e "$8"; then
+        : > "$REMOTE_SSH_MCP_TEST_MARKER"
+    fi
+    : > "$REMOTE_SSH_MCP_TEST_CHECKED"
+fi
+exec {shlex.quote(real_setsid)} "$@"
+""",
+        encoding="utf-8",
+    )
+    fake_setsid.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+    monkeypatch.setenv("TMPDIR", str(runtime))
+    monkeypatch.setenv("REMOTE_SSH_MCP_TEST_MARKER", str(marker))
+    monkeypatch.setenv("REMOTE_SSH_MCP_TEST_CHECKED", str(checked))
+
+    result = await runner.execute(
+        f"while test ! -e {shlex.quote(str(checked))}; do sleep 0.01; done\n"
+        "printf ready",
+        timeout=10,
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout.raw == b"ready"
+    assert checked.exists()
+    assert not marker.exists()
+    assert list(runtime.iterdir()) == []
+
+
+@pytest.mark.asyncio
 async def test_close_terminates_active_commands_and_rejects_new_ones(
     command_stack, tmp_path: Path
 ) -> None:

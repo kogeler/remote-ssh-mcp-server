@@ -31,15 +31,26 @@ payload_pipe=$2
 watcher_gate=$3
 watcher_pid_pipe=$4
 runtime_dir=$5
-IFS= read -r armed < "$watcher_gate" || exit 75
-rm -f -- "$watcher_gate"
 IFS= read -r unexpected || true
 /bin/kill -TERM -- "-$group_pid" 2>/dev/null || true
 sleep 1
 /bin/kill -KILL -- "-$group_pid" 2>/dev/null || true
 rm -f -- "$payload_pipe"
+rm -f -- "$watcher_gate"
 rm -f -- "$watcher_pid_pipe"
 rmdir -- "$runtime_dir" 2>/dev/null || true
+"""
+    watcher_launcher = f"""\
+group_pid=$1
+payload_pipe=$2
+watcher_gate=$3
+watcher_pid_pipe=$4
+runtime_dir=$5
+IFS= read -r armed < "$watcher_gate" || exit 75
+rm -f -- "$watcher_gate"
+exec setsid /bin/sh -c {shlex.quote(watcher)} remote-ssh-mcp-watcher \
+    "$group_pid" "$payload_pipe" "$watcher_gate" "$watcher_pid_pipe" \
+    "$runtime_dir"
 """
     child_runner = f"""\
 payload_pipe=$1
@@ -47,7 +58,7 @@ watcher_gate=$2
 watcher_pid_pipe=$3
 runtime_dir=$4
 shift 4
-setsid /bin/sh -c {shlex.quote(watcher)} remote-ssh-mcp-watcher "$$" \
+/bin/sh -c {shlex.quote(watcher_launcher)} remote-ssh-mcp-watcher-launcher "$$" \
     "$payload_pipe" "$watcher_gate" "$watcher_pid_pipe" "$runtime_dir" \
     <&3 >/dev/null 2>&1 &
 watcher_pid=$!
@@ -68,7 +79,10 @@ terminate_child() {{
     if test -z "$child_pid"; then
         return
     fi
-    /bin/kill -TERM -- "-$child_pid" 2>/dev/null || return
+    if ! /bin/kill -TERM -- "-$child_pid" 2>/dev/null; then
+        /bin/kill -TERM "$child_pid" 2>/dev/null || true
+    fi
+    /bin/kill -TERM -- "-$child_pid" 2>/dev/null || true
     sleep 1
     /bin/kill -KILL -- "-$child_pid" 2>/dev/null || true
     wait "$child_pid" 2>/dev/null || true
@@ -134,6 +148,10 @@ watcher_gate=$runtime_dir/watcher-gate
 watcher_pid_pipe=$runtime_dir/watcher-pid
 mkfifo -m 600 "$payload_pipe" "$watcher_gate" "$watcher_pid_pipe" || exit 73
 exec 3<&0
+# Read-write guards make both control FIFOs non-blocking to open. The child
+# closes these inherited descriptors and cannot keep either guard alive.
+exec 7<> "$watcher_pid_pipe" || exit 73
+exec 8<> "$watcher_gate" || exit 73
 # A temporary read-write guard lets the supervisor open separate read-only and
 # write-only ends without blocking. The child inherits only the read end, so it
 # still receives EOF as soon as the payload writer closes.
@@ -145,25 +163,26 @@ startup_critical=1
 setsid /bin/sh -c {shlex.quote(child_runner)} remote-ssh-mcp-child \
     "$payload_pipe" "$watcher_gate" "$watcher_pid_pipe" "$runtime_dir" \
     {remote_program} \
-    <&5 5<&- 6>&- &
+    <&5 5<&- 6>&- 7>&- 8>&- &
 child_pid=$!
 startup_critical=0
 if test "$interruption_pending" = 1; then
     exit 255
 fi
 exec 5<&-
-# The child runner creates a detached watcher and then execs the remote shell.
-# The outer supervisor therefore owns one waitable child only, avoiding dash
-# SIGCHLD races. A private FIFO transfers the watcher PID before the payload is
-# released; the gate keeps that watcher from competing with dd for input.
-IFS= read -r watcher_pid < "$watcher_pid_pipe" || exit 76
+# The child runner starts the watcher in the command's process group and then
+# execs the remote shell. The watcher detaches only after this supervisor has
+# its PID and arms it, so cancellation cannot strand an unregistered reader.
+IFS= read -r watcher_pid <&7 || exit 76
+exec 7>&-
 case "$watcher_pid" in
     ''|*[!0-9]*) exit 76 ;;
 esac
 rm -f -- "$watcher_pid_pipe"
 dd iflag=fullblock bs=1 count="$payload_size" status=none >&6 || exit 74
 exec 6>&-
-printf 'armed\n' > "$watcher_gate" || exit 75
+printf 'armed\n' >&8 || exit 75
+exec 8>&-
 wait "$child_pid"
 status=$?
 child_pid=

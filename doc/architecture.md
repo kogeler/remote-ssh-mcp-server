@@ -64,14 +64,16 @@ mapping nor raw master diagnostics.
 ## Command Data Path
 
 UTF-8 scripts enter a fixed remote non-PTY shell through stdin. A supervisor
-creates one remote process group and registers a detached channel-loss watcher
-before releasing the script payload through private FIFOs. The supervisor
-waits on only the exec'd command process; the watcher PID and activation gate
-never compete with payload input or the shell's child-status handling. Timeout,
-cancellation, or local transport loss therefore terminates remote descendants
-without losing a short-lived command's exit status. Stdout and stderr are
-drained concurrently; each capture is bounded independently. Optional full
-spooling writes only below the protected local boundary.
+creates one remote process group and registers a channel-loss watcher before
+releasing the script payload through private FIFOs. The watcher remains in the
+owned command group until its PID is registered and its activation gate is
+delivered, and only then detaches. The supervisor waits on only the exec'd
+command process; the watcher control channel never competes with payload input
+or the shell's child-status handling. Timeout, cancellation, or local transport
+loss therefore terminates remote descendants without losing a short-lived
+command's exit status. Stdout and stderr are drained concurrently; each capture
+is bounded independently. Optional full spooling writes only below the
+protected local boundary.
 
 Inspection invokes fixed remote programs and parses their machine-readable
 output into strict models. `sudo_exec` uses the same runner with a fixed sudo

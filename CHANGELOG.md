@@ -5,6 +5,12 @@ SSH transport library have their own changelog.
 
 ## Unreleased
 
+### Fixed
+
+- Closed a command-cancellation race that could detach the channel-loss
+  watcher before its PID was registered, leaving a blocked FIFO reader or its
+  private runtime directory behind.
+
 ### Changed
 
 - Moved all exact direct Python versions to native
