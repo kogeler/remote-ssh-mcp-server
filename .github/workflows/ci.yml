@@ -10,6 +10,11 @@ on:
   workflow_dispatch:
   workflow_call:
     inputs:
+      base_ref:
+        description: Exact base commit for version progression.
+        required: false
+        type: string
+        default: ""
       upload_release_artifacts:
         description: Preserve the verified standalone release candidates.
         required: false
@@ -108,6 +113,101 @@ jobs:
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294
         with:
           config-file: ./.github/dependency-review-config.yml
+
+  # Ordinary changes may retain a published version while Unreleased accumulates.
+  # An unpublished current version still has to advance beyond published history.
+  version:
+    name: Exact version progression
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    env:
+      BASE_REF: ${{ inputs.base_ref || github.event.pull_request.base.sha || github.event.before }}
+      ZERO_SHA: "0000000000000000000000000000000000000000"
+    steps:
+      - name: Check out proposed revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Resolve exact published and base versions
+        id: baseline
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          EXPECTED_REPOSITORY: kogeler/remote-ssh-mcp-server
+          VERSION_PATH: .version
+        with:
+          script: |
+            const fs = await import("node:fs/promises");
+            const repository = `${context.repo.owner}/${context.repo.repo}`;
+            if (repository !== process.env.EXPECTED_REPOSITORY) {
+              throw new Error(`Refusing to inspect unexpected repository ${repository}`);
+            }
+            const current = (await fs.readFile(process.env.VERSION_PATH, "utf8")).trim();
+            const stable = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
+            if (!stable.test(current)) throw new Error(".version is not stable X.Y.Z");
+
+            let base = "0.0.0";
+            const baseRef = process.env.BASE_REF;
+            if (baseRef && baseRef !== process.env.ZERO_SHA) {
+              const response = await github.rest.repos.getContent({
+                ...context.repo,
+                path: ".version",
+                ref: baseRef,
+              });
+              if (
+                Array.isArray(response.data) || response.data.type !== "file" ||
+                response.data.encoding !== "base64" ||
+                typeof response.data.content !== "string"
+              ) {
+                throw new Error("base .version is not a Base64 repository file");
+              }
+              base = Buffer.from(
+                response.data.content.replace(/\n/g, ""),
+                "base64",
+              ).toString("utf8").trim();
+            }
+            if (!stable.test(base)) throw new Error("base version is not stable X.Y.Z");
+
+            let publishedCurrent = false;
+            let unpublished = "";
+            try {
+              const currentRelease = await github.rest.repos.getReleaseByTag({
+                ...context.repo,
+                tag: current,
+              });
+              publishedCurrent = currentRelease.data.tag_name === current &&
+                !currentRelease.data.draft && !currentRelease.data.prerelease;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            if (!publishedCurrent) {
+              unpublished = "0.0.0";
+              try {
+                const latest = await github.rest.repos.getLatestRelease({ ...context.repo });
+                unpublished = latest.data.tag_name;
+              } catch (latestError) {
+                if (latestError.status !== 404) throw latestError;
+              }
+              if (!stable.test(unpublished)) {
+                throw new Error("latest release is not a stable X.Y.Z tag");
+              }
+            }
+            core.setOutput("base_version", base);
+            core.setOutput("published_current_version", String(publishedCurrent));
+            core.setOutput("unpublished_base_version", unpublished);
+      - name: Compare exact base and proposed versions
+        env:
+          BASE_VERSION: ${{ steps.baseline.outputs.base_version }}
+          PUBLISHED_CURRENT_VERSION: ${{ steps.baseline.outputs.published_current_version }}
+          UNPUBLISHED_BASE_VERSION: ${{ steps.baseline.outputs.unpublished_base_version }}
+        run: |
+          current_version="$(tr -d '\r\n' < .version)"
+          args=""
+          if [[ "$current_version" != "$BASE_VERSION" ]]; then
+            args="--base-version $BASE_VERSION"
+          elif [[ "$PUBLISHED_CURRENT_VERSION" != "true" ]]; then
+            args="--base-version $BASE_VERSION --unpublished-base-version $UNPUBLISHED_BASE_VERSION"
+          fi
+          make version-check SYSTEM_PYTHON=python VERSION_ARGS="$args"
 
   codeql:
     name: CodeQL (${{ matrix.language }})

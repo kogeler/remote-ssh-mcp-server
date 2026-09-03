@@ -1,12 +1,12 @@
 # Copyright (c) 2026 kogeler. SPDX-License-Identifier: MIT.
 name: Release
 
+# Publication is external-state driven, not change-path driven. Every main push
+# performs only the state inspection when the current version is already exact.
 on:
   push:
     branches:
       - main
-    paths:
-      - .version
 
 permissions:
   contents: read
@@ -36,11 +36,11 @@ jobs:
               throw new Error(`Refusing to inspect unexpected repository ${repository}`);
             }
 
-            const readFile = async (path) => {
+            const readFile = async (path, ref = context.sha) => {
               const response = await github.rest.repos.getContent({
                 ...context.repo,
                 path,
-                ref: context.sha,
+                ref,
               });
               if (
                 Array.isArray(response.data) ||
@@ -60,25 +60,29 @@ jobs:
               throw new Error(".version is not a stable semantic version");
             }
 
-            const changelog = await readFile("CHANGELOG.md");
-            const escapedVersion = version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-            const heading = new RegExp(
-              `^## ${escapedVersion} - [0-9]{4}-[0-9]{2}-[0-9]{2}$`,
-              "gm",
-            );
-            const matches = [...changelog.matchAll(heading)];
-            if (matches.length !== 1) {
-              throw new Error(`CHANGELOG.md does not have one exact ${version} section`);
-            }
-            const start = matches[0].index + matches[0][0].length;
-            const remaining = changelog.slice(start);
-            const nextHeading = remaining.search(/^## /m);
-            const body = remaining.slice(0, nextHeading < 0 ? undefined : nextHeading).trim();
-            if (!body || !/^- /m.test(body)) {
-              throw new Error(`CHANGELOG.md section ${version} has no release entries`);
-            }
-            const expectedBody = `${body}\n\nFull changelog: ` +
-              `https://github.com/${repository}/blob/${version}/CHANGELOG.md\n`;
+            const releaseBody = (changelog) => {
+              const escapedVersion = version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+              const heading = new RegExp(
+                `^## ${escapedVersion} - [0-9]{4}-[0-9]{2}-[0-9]{2}$`,
+                "gm",
+              );
+              const matches = [...changelog.matchAll(heading)];
+              if (matches.length !== 1) {
+                throw new Error(`CHANGELOG.md does not have one exact ${version} section`);
+              }
+              const start = matches[0].index + matches[0][0].length;
+              const remaining = changelog.slice(start);
+              const nextHeading = remaining.search(/^## /m);
+              const body = remaining.slice(
+                0,
+                nextHeading < 0 ? undefined : nextHeading,
+              ).trim();
+              if (!body || !/^- /m.test(body)) {
+                throw new Error(`CHANGELOG.md section ${version} has no release entries`);
+              }
+              return `${body}\n\nFull changelog: ` +
+                `https://github.com/${repository}/blob/${version}/CHANGELOG.md\n`;
+            };
             const expectedAssets = new Set([
               "remote-ssh-mcp-linux-amd64",
               "remote-ssh-mcp-linux-arm64",
@@ -103,37 +107,50 @@ jobs:
             } catch (error) {
               if (error.status !== 404) throw error;
             }
+            if (
+              tag && (
+                tag.data.ref !== `refs/tags/${version}` ||
+                tag.data.object.type !== "commit"
+              )
+            ) {
+              throw new Error(`Published release ${version} has a conflicting tag or target`);
+            }
+            if (!existing && tag) {
+              throw new Error(`Tag ${version} exists without a recoverable release`);
+            }
+            const published = Boolean(existing && !existing.draft);
+            if (published && !tag) {
+              throw new Error(`Published release ${version} has no matching Git tag`);
+            }
+            if (!published && tag && tag.data.object.sha !== context.sha) {
+              throw new Error(`Unpublished release ${version} has a conflicting tag target`);
+            }
+            const releaseCommit = published ? tag.data.object.sha : context.sha;
+            const releaseVersion = (await readFile(".version", releaseCommit)).trim();
+            if (releaseVersion !== version) {
+              throw new Error(
+                `Release source ${releaseCommit} contains .version ${releaseVersion}`,
+              );
+            }
+            const expectedBody = releaseBody(
+              await readFile("CHANGELOG.md", releaseCommit),
+            );
             if (!existing) {
-              if (tag) {
-                throw new Error(`Tag ${version} exists without a recoverable release`);
-              }
               core.notice(`No release exists for ${version}; running release gates`);
               core.setOutput("release_required", "true");
               return;
             }
             if (
               existing.tag_name !== version || existing.name !== version ||
-              existing.body !== expectedBody || existing.target_commitish !== context.sha ||
-              existing.prerelease
+              existing.body !== expectedBody ||
+              existing.target_commitish !== releaseCommit || existing.prerelease
             ) {
               throw new Error(`Existing release ${version} metadata is not exact`);
-            }
-            if (
-              tag && (
-                tag.data.ref !== `refs/tags/${version}` ||
-                tag.data.object.type !== "commit" ||
-                tag.data.object.sha !== context.sha
-              )
-            ) {
-              throw new Error(`Published release ${version} has a conflicting tag or target`);
             }
             if (existing.draft) {
               core.notice(`Recovering exact draft release ${version}`);
               core.setOutput("release_required", "true");
               return;
-            }
-            if (!tag) {
-              throw new Error(`Published release ${version} has no matching Git tag`);
             }
 
             const assets = await github.paginate(github.rest.repos.listReleaseAssets, {
@@ -180,7 +197,7 @@ jobs:
               throw new Error(`Published release ${version} has conflicting checksums`);
             }
 
-            core.notice(`Release ${existing.html_url} already matches this commit`);
+            core.notice(`Release ${existing.html_url} matches its tagged source`);
             core.setOutput("release_required", "false");
 
   ci:
@@ -189,6 +206,7 @@ jobs:
     if: needs.release-state.outputs.release_required == 'true'
     uses: ./.github/workflows/ci.yml
     with:
+      base_ref: ${{ github.event.before }}
       upload_release_artifacts: true
     permissions:
       actions: read
