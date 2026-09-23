@@ -1,7 +1,7 @@
 {
   "permissions": {
     "allow": [
-      "mcp__remote_machine__connection_status",
+      "mcp__remote_machine__session_list",
       "mcp__remote_machine__stat",
       "mcp__remote_machine__list_directory",
       "mcp__remote_machine__read_file_range",

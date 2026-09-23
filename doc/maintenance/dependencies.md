@@ -50,9 +50,10 @@ declared by wheel metadata. The package exceptions cover that external
 aggregation without granting the same license to unrelated dependencies; they
 do not turn the GitHub action's package-level exception into a per-license one.
 
-`ssh-wrapper==0.1.0` is resolved from PyPI. Every runtime-derived lock—runtime,
-development, standalone, and documentation—binds its published artifact
-hashes, and no source directory is added to `PYTHONPATH`.
+The exact `ssh-wrapper` version pinned in `requirements.in` is resolved from
+PyPI. Every runtime-derived lock—runtime, development, standalone, and
+documentation—binds its published artifact hashes, and no source directory is
+added to `PYTHONPATH`.
 
 Use `make lock` after changing direct dependencies in `requirements*.in` and
 `make refresh-dependencies` for a deliberate whole-tree upgrade. Review every

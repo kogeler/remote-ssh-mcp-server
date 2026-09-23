@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "remote-ssh-mcp"
-version = "0.2.0"
-description = "Bounded remote-machine tools for MCP clients over one OpenSSH master"
+version = "0.3.0"
+description = "Bounded remote-machine tools for MCP clients over keyed OpenSSH sessions"
 readme = "README.md"
 requires-python = ">=3.13,<3.15"
 license = "MIT"

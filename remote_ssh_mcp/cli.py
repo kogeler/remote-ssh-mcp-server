@@ -18,6 +18,7 @@ DEFAULT_CONNECT_TIMEOUT = 120.0
 DEFAULT_COMMAND_TIMEOUT = 120.0
 DEFAULT_MAX_OUTPUT_BYTES = 1_048_576
 DEFAULT_MAX_TRANSFERS = 2
+DEFAULT_MAX_SESSIONS = 8
 
 
 def _find_remote_error(error: BaseException) -> RemoteMCPError | None:
@@ -35,7 +36,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="remote-ssh-mcp",
         description=(
-            "Run a disconnected local STDIO MCP server with explicit SSH lifecycle tools."
+            "Run a local STDIO MCP server whose independent SSH sessions are opened "
+            "only by explicit connect calls."
         ),
     )
     parser.add_argument(
@@ -77,8 +79,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_MAX_TRANSFERS,
         metavar="COUNT",
         help=(
-            "maximum concurrent background transfers, 1..16 "
+            "maximum concurrent background transfers per session, 1..16 "
             f"(default: {DEFAULT_MAX_TRANSFERS})"
+        ),
+    )
+    parser.add_argument(
+        "--max-sessions",
+        type=int,
+        default=DEFAULT_MAX_SESSIONS,
+        metavar="COUNT",
+        help=(
+            "maximum simultaneously open SSH sessions, 1..32 "
+            f"(default: {DEFAULT_MAX_SESSIONS})"
         ),
     )
     parser.add_argument(

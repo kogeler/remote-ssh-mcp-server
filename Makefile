@@ -95,7 +95,7 @@ runtime-venv:
 		[[ ! -f '$(RUNTIME_VENV)/.version' ]] || \
 		! cmp -s requirements.txt '$(RUNTIME_VENV)/.requirements.txt' || \
 		! cmp -s .version '$(RUNTIME_VENV)/.version' || \
-		! '$(RUNTIME_PYTHON)' -c 'import importlib.metadata, pathlib, remote_ssh_mcp, ssh_wrapper; expected = pathlib.Path(".version").read_text(encoding="utf-8").strip(); assert remote_ssh_mcp.__version__ == expected; assert importlib.metadata.version("remote-ssh-mcp") == expected; assert importlib.metadata.version("ssh-wrapper") == "0.1.0"' >/dev/null 2>&1 || \
+		! '$(RUNTIME_PYTHON)' -c 'import importlib.metadata, pathlib, remote_ssh_mcp, ssh_wrapper; expected = pathlib.Path(".version").read_text(encoding="utf-8").strip(); assert remote_ssh_mcp.__version__ == expected; assert importlib.metadata.version("remote-ssh-mcp") == expected; assert importlib.metadata.version("ssh-wrapper") == next(line.split("==", 1)[1].split()[0] for line in pathlib.Path("requirements.txt").read_text(encoding="utf-8").splitlines() if line.startswith("ssh-wrapper=="))' >/dev/null 2>&1 || \
 		'$(RUNTIME_PYTHON)' -c 'import pip' >/dev/null 2>&1; then \
 		if [[ -e '$(RUNTIME_VENV)' ]]; then \
 			find '$(RUNTIME_VENV)' -depth -delete; \
@@ -115,7 +115,7 @@ dev-venv:
 	@if [[ ! -x '$(DEV_PYTHON)' ]] || \
 		[[ ! -f '$(DEV_VENV)/.requirements-dev.txt' ]] || \
 		! cmp -s requirements-dev.txt '$(DEV_VENV)/.requirements-dev.txt' || \
-		! '$(DEV_PYTHON)' -c 'import importlib.metadata, pip, ssh_wrapper; assert importlib.metadata.version("ssh-wrapper") == "0.1.0"' >/dev/null 2>&1; then \
+		! '$(DEV_PYTHON)' -c 'import importlib.metadata, pathlib, pip, ssh_wrapper; assert importlib.metadata.version("ssh-wrapper") == next(line.split("==", 1)[1].split()[0] for line in pathlib.Path("requirements-dev.txt").read_text(encoding="utf-8").splitlines() if line.startswith("ssh-wrapper=="))' >/dev/null 2>&1; then \
 		if [[ -e '$(DEV_VENV)' ]]; then find '$(DEV_VENV)' -depth -delete; fi; \
 		'$(SYSTEM_PYTHON)' -m venv '$(DEV_VENV)'; \
 		'$(DEV_PYTHON)' -m pip install --quiet --require-hashes \

@@ -1,7 +1,7 @@
 # Security Model
 
-Remote SSH MCP gives an MCP client the authority of one local user and one
-remote SSH account. It narrows transport, capture, filesystem, and cleanup
+Remote SSH MCP gives an MCP client the authority of one local user and of the
+remote SSH accounts it deliberately connects to. It narrows transport, capture, filesystem, and cleanup
 behavior; it is not a sandbox for arbitrary remote commands.
 
 ## Trust Boundaries
@@ -23,12 +23,18 @@ local programs. Review it before exposing an alias or host to an agent.
 ## SSH Boundary
 
 - Server startup does not authenticate.
-- `connect` owns one foreground OpenSSH ControlMaster and a private socket.
+- Each `connect` creates one session owning one foreground OpenSSH
+  ControlMaster and a private socket. Sessions authenticate one at a time.
+- Before authenticating, `connect` runs `ssh -G` for the same target to learn
+  its effective `HostName` and `Port`; like any OpenSSH invocation, this
+  evaluates the user's configuration, including `Match exec`. A server that
+  another session owns is refused without authenticating.
 - Mux clients disable passwords, public-key authentication, host-based
   authentication, GSSAPI, and fallback proxying.
 - Forwarding, agent sharing, X11 forwarding, and SSH-configured local and
   remote commands are disabled.
-- Master loss is reported and never starts another authentication.
+- Master loss is reported and never starts another authentication; only an
+  explicit disconnect followed by a new `connect` does.
 - Linux session recovery may import only the documented eight routing values;
   non-empty inherited values win. It never imports `PATH`, `HOME`, loader or
   Python variables, credentials, or an arbitrary login environment.
@@ -39,11 +45,27 @@ Native OpenSSH remains responsible for host keys, proxies, identities, and
 hardware-token prompts. The published `ssh-wrapper` library owns that
 transport implementation; this project owns its MCP exposure.
 
+## Session Keys
+
+A session key is a 256-bit random capability returned only in the `connect`
+result. The server stores its SHA-256 digest, compares presented keys in
+constant time, and never returns, logs, or lists the key. Every operation other
+than `connect`, `disconnect`, and `session_list` must present the matching
+session ID and key, which prevents another agent sharing the server process,
+or the same agent, from silently using the wrong session or server.
+
+The key separates callers of one server process; it is not a secret from the
+local user or the MCP client. It travels in tool-call arguments and client
+transcripts. `session_list` shows every session's target and state to every
+caller, and `disconnect` closes any session by ID without a key, so any caller
+can end another caller's session and its active work. Sessions carry no
+free-form caller text that other agents would read.
+
 ## Local Files
 
-Every model-selected local path is relative to one explicit local root: the
-source project which owns the prepared venv, or the directory containing a
-standalone executable. Traversal, NULs, protected internal paths, and symlink escapes are
+Every model-selected local path is relative to one explicit local root shared
+by all sessions: the source project which owns the prepared venv, or the
+directory containing a standalone executable. Traversal, NULs, protected internal paths, and symlink escapes are
 rejected. Spools and transfer partials use private directories and restrictive
 creation modes. Normal access controls of the current local user remain the
 outer trust boundary.
@@ -107,6 +129,9 @@ status, not the diagnostic text.
   programs.
 - Other processes running as the same local user can access files that normal
   filesystem permissions allow; the project does not create a user sandbox.
-- Transfer operation metadata is in memory and does not survive server restart.
+- Transfer operation metadata and sessions are in memory and do not survive
+  server restart.
+- Server identity is the effective OpenSSH `HostName` and `Port`; different
+  names or addresses for the same machine are distinct servers.
 - Cleanup owns only processes and runtime paths created by this server; it does
   not discover or terminate unrelated SSH sessions.

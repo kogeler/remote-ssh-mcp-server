@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -243,3 +245,33 @@ def test_public_launcher_ignores_hostile_pythonpath(tmp_path: Path) -> None:
     assert completed.returncode == 2, completed.stderr
     assert "connect timeout must be between" in completed.stderr
     assert "ambient" not in completed.stderr
+
+
+def test_launcher_probe_binds_ssh_wrapper_to_the_runtime_lock(tmp_path: Path) -> None:
+    """The import probe reads the locked version instead of a literal."""
+    source = Path(__file__).resolve().parents[1]
+    launcher = (source / "remote-ssh-mcp").read_text(encoding="utf-8")
+    match = re.search(r"-I -c \\\n    '([^']+)'", launcher)
+    assert match is not None
+    probe = match.group(1)
+    assert 'version("ssh-wrapper") == "' not in probe
+    lock = (source / "requirements.txt").read_text(encoding="utf-8")
+
+    def run_probe(lock_path: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-I", "-c", probe, str(source / ".version"), lock_path],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    accepted = run_probe(source / "requirements.txt")
+    assert accepted.returncode == 0, accepted.stderr
+
+    stale = tmp_path / "requirements.txt"
+    stale.write_text(
+        re.sub(r"^ssh-wrapper==\S+", "ssh-wrapper==0.0.0", lock, flags=re.MULTILINE),
+        encoding="utf-8",
+    )
+    rejected = run_probe(stale)
+    assert rejected.returncode != 0

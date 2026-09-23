@@ -5,14 +5,32 @@ SSH transport library have their own changelog.
 
 ## Unreleased
 
-### Fixed
-
-- Closed a command-cancellation race that could detach the channel-loss
-  watcher before its PID was registered, leaving a blocked FIFO reader or its
-  private runtime directory behind.
+## 0.3.0 - 2026-09-23
 
 ### Changed
 
+- Replaced the single connection with independent keyed SSH sessions so
+  several agents, or one agent working with several servers, can share one
+  server process. `connect` now returns a public `session_id` and a secret
+  `session_key` exactly once; every remote operation requires both, and a key
+  from another session is rejected. This changes every operational tool
+  schema.
+- Replaced `connection_status` with `session_list`, which shows every session
+  without keys, and made `disconnect` close any session by `session_id`
+  without a key, including one that is still authenticating.
+- Allowed at most one session per remote server, identified before
+  authentication by the effective OpenSSH `HostName` and `Port`; a duplicate
+  `connect` fails with `already_connected` and names the owning session.
+- Serialized session authentication so each PIN dialog or hardware-key touch
+  belongs to one pending `connect`, added `--max-sessions` (default 8), made
+  `--max-transfers` a per-session limit, and reserved active transfer
+  destinations across sessions.
+- Made `invalid_arguments` errors name the missing or invalid schema fields,
+  for example a missing `session_id` and `session_key`, without repeating
+  argument values or unknown field names.
+- Updated the runtime to the published `ssh-wrapper==0.1.1` and `mcp==2.2.0`;
+  closing a session that is still authenticating relies on the wrapper's
+  cancellable master startup.
 - Moved all exact direct Python versions to native
   `requirements*.in`/`requirements*.txt` pip-compile pairs so Dependabot can
   update each complete graph instead of treating `pyproject.toml` as a plain
@@ -28,6 +46,16 @@ SSH transport library have their own changelog.
   and publication when that release is already complete.
 - Clarified and regression-tested PR-body mirroring of a populated
   `Unreleased` section without requiring a version change.
+
+### Fixed
+
+- Stopped the source launcher, runtime and development environment checks, and
+  the live harness from requiring a hard-coded `ssh-wrapper` version; they now
+  read the exact version from the hash locks, so the launcher accepts the
+  locked `ssh-wrapper==0.1.1` runtime.
+- Closed a command-cancellation race that could detach the channel-loss
+  watcher before its PID was registered, leaving a blocked FIFO reader or its
+  private runtime directory behind.
 
 ## 0.2.0 - 2026-08-29
 

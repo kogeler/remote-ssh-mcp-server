@@ -57,8 +57,9 @@ make no network requests. Use `make docs-serve` for a local preview; generated
 
 ## Published SSH Dependency
 
-`ssh-wrapper==0.1.0` is resolved from PyPI and bound by SHA-256 in every
-runtime-derived lock: runtime, development, standalone, and documentation.
+The exact `ssh-wrapper` version pinned in `requirements.in` is resolved from
+PyPI and bound by SHA-256 in every runtime-derived lock: runtime, development,
+standalone, and documentation.
 Tests and the launcher import only that installed distribution and never add an
 alternate source directory to `PYTHONPATH`.
 
@@ -86,8 +87,13 @@ make live-test
 The automatic path generates an ephemeral Ed25519 key, creates one private
 Podman network, starts a confined MCP server container and a disposable SSH
 target, and proves command, inspection, sudo, transfer, disconnect, master-loss,
-and selective-cleanup behavior. The harness removes only resources bearing its
-per-run ownership labels.
+independent keyed sessions, and selective-cleanup behavior. A second SSH alias
+reaches the same target through a different effective `HostName`, so the server
+treats it as a second server: the matrix proves one session per server, key
+isolation, parallel sessions, private transfers, and disconnect by ID. The
+harness removes only resources bearing its per-run ownership labels. The
+hardware-key matrix therefore asks for a second PIN or touch when it opens the
+second session.
 
 Hardware-token acceptance keeps the MCP process on the host so OpenSSH can use
 the operator's normal authentication UI:

@@ -3,23 +3,28 @@
 **Give AI coding agents reliable remote-machine access without handing them a
 raw terminal.**
 
-Remote SSH MCP turns one ordinary OpenSSH connection into 13 structured tools
+Remote SSH MCP turns ordinary OpenSSH connections into 13 structured tools
 for Codex, Claude Code, and other MCP clients. Agents can inspect files, run
 bounded commands, use passwordless sudo, and move large files without pushing
 terminal noise or file contents through the model context.
 
 ## Why Use It?
 
-- **Authenticate once.** A deliberate `connect` opens one native OpenSSH
-  master; every command and transfer reuses it. FIDO2/YubiKey PIN and touch
-  happen once per connection, not once per tool call.
+- **Authenticate once per server.** A deliberate `connect` opens one native
+  OpenSSH master as an independent session; every command and transfer in that
+  session reuses it. FIDO2/YubiKey PIN and touch happen once per session, not
+  once per tool call.
+- **Never hit the wrong server.** Each session has a public ID and a secret key
+  returned only once; every operation must present both. Several agents, or
+  one agent with several servers, can share a server process, and each remote
+  server has at most one session.
 - **Move large files properly.** Background rsync transfers support progress,
   cancellation, resume, SHA-256 verification, and atomic publication.
 - **Fail closed.** A lost master never reconnects silently, sudo never asks for
   a password, and mux clients cannot fall back to a new SSH login.
-- **Keep control visible.** The server starts disconnected, exposes no network
-  listener, and separates read-only tools from state-changing operations for
-  client approval policies.
+- **Keep control visible.** The server starts without sessions, lists them
+  for every caller without keys, exposes no network listener, and separates
+  read-only tools from state-changing operations for client approval policies.
 - **Use your existing SSH setup.** Host aliases, ProxyJump, host keys, agents,
   and hardware-token integration remain OpenSSH's responsibility.
 
@@ -29,9 +34,8 @@ terminal noise or file contents through the model context.
 - OpenSSH and rsync on both machines, plus the standard `false` utility locally
 - CPython 3.13 or 3.14 with `venv`, Bash, and GNU Make when installing from
   source; the standalone Linux executable bundles its Python runtime
-- access to the published
-  [`ssh-wrapper==0.1.0`](https://pypi.org/project/ssh-wrapper/0.1.0/) wheel when
-  preparing a source environment
+- access to the published [`ssh-wrapper`](https://pypi.org/project/ssh-wrapper/)
+  wheel pinned in `requirements.in` when preparing a source environment
 - rootless Podman only for disposable container and live acceptance targets
 
 ## Quick Start
@@ -62,8 +66,9 @@ environment. Its state is bound to both `requirements.txt` and the project
 `make runtime-venv` refresh.
 
 After setup, add `remote-ssh-mcp` to your MCP client. The server starts
-disconnected; an approved `connect` call selects an OpenSSH alias or a direct
-host/user pair with an optional port.
+without sessions; each approved `connect` call selects an OpenSSH alias or a
+direct host/user pair with an optional port and returns that session's ID and
+one-time key.
 
 ## Documentation
 

@@ -43,18 +43,3 @@ class OpenSSHMaster(CoreOpenSSHMaster):
             connection,
             runtime_base=runtime_base,
         )
-
-    def status(self) -> dict[str, str | int | None]:
-        """Return the MCP lifecycle view without exposing private paths."""
-        connection = self.connection
-        process = self.process
-        return {
-            "state": self.state.value,
-            "mode": connection.mode.value,
-            "target": connection.display_target,
-            "ssh_alias": connection.ssh_alias,
-            "host": connection.host,
-            "user": connection.user,
-            "port": connection.port,
-            "master_pid": process.pid if process is not None else None,
-        }

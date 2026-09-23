@@ -9,7 +9,7 @@ tool_timeout_sec = 150
 enabled_tools = [
     "connect",
     "disconnect",
-    "connection_status",
+    "session_list",
     "exec",
     "sudo_exec",
     "stat",

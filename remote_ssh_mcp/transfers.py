@@ -116,6 +116,7 @@ class TransferOperation:
     _process: asyncio.subprocess.Process | None = field(default=None, repr=False)
     _cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     _finished_monotonic: float | None = field(default=None, repr=False)
+    _reserved: bool = field(default=False, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -138,6 +139,22 @@ class TransferOperation:
         }
 
 
+class TransferReservations:
+    """Own active transfer destinations across every session of one process."""
+
+    def __init__(self) -> None:
+        self._claimed: set[str] = set()
+
+    def claim(self, resource_key: str) -> bool:
+        if resource_key in self._claimed:
+            return False
+        self._claimed.add(resource_key)
+        return True
+
+    def release(self, resource_key: str) -> None:
+        self._claimed.discard(resource_key)
+
+
 class TransferManager:
     def __init__(
         self,
@@ -148,6 +165,7 @@ class TransferManager:
         inspector: RemoteInspector,
         *,
         completed_ttl: float = DEFAULT_COMPLETED_TTL,
+        reservations: TransferReservations | None = None,
     ) -> None:
         self.config = config
         self.master = master
@@ -155,6 +173,9 @@ class TransferManager:
         self.runner = runner
         self.inspector = inspector
         self.completed_ttl = completed_ttl
+        self.reservations = (
+            TransferReservations() if reservations is None else reservations
+        )
         self._operations: dict[str, TransferOperation] = {}
         self._lock = asyncio.Lock()
         self._closed = False
@@ -170,7 +191,7 @@ class TransferManager:
         for operation_id in expired:
             del self._operations[operation_id]
 
-    def _active_count(self) -> int:
+    def active_count(self) -> int:
         return sum(
             operation.state not in FINAL_STATES
             for operation in self._operations.values()
@@ -182,20 +203,18 @@ class TransferManager:
                 "transfer_manager_closed", "transfer manager is closed"
             )
         self._prune()
-        if self._active_count() >= self.config.max_transfers:
+        if self.active_count() >= self.config.max_transfers:
             raise RemoteMCPError(
                 "transfer_limit_reached",
-                f"at most {self.config.max_transfers} transfers may run concurrently",
+                f"at most {self.config.max_transfers} transfers may run "
+                "concurrently in one session",
             )
-        if any(
-            existing.state not in FINAL_STATES
-            and existing._resource_key == operation._resource_key
-            for existing in self._operations.values()
-        ):
+        if not self.reservations.claim(operation._resource_key):
             raise RemoteMCPError(
                 "transfer_conflict",
                 "another active transfer already owns the same destination",
             )
+        operation._reserved = True
         self._operations[operation.operation_id] = operation
 
     @staticmethod
@@ -256,7 +275,7 @@ class TransferManager:
             local_path=display,
             remote_path=remote,
             overwrite=overwrite,
-            _resource_key=f"upload\0{remote}",
+            _resource_key=f"upload\0{self.master.connection.cache_key}\0{remote}",
             _local_absolute=source,
         )
         token = self._partial_token(
@@ -268,14 +287,16 @@ class TransferManager:
             operation._task = asyncio.create_task(self._run_upload(operation))
         return operation.to_dict()
 
-    @staticmethod
-    def _set_state(operation: TransferOperation, state: TransferState) -> None:
+    def _set_state(self, operation: TransferOperation, state: TransferState) -> None:
         operation.state = state
         if state is TransferState.RUNNING and operation.started_at is None:
             operation.started_at = _timestamp()
         if state in FINAL_STATES:
             operation.finished_at = _timestamp()
             operation._finished_monotonic = time.monotonic()
+            if operation._reserved:
+                operation._reserved = False
+                self.reservations.release(operation._resource_key)
 
     async def _read_rsync_stream(
         self,

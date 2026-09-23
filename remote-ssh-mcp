@@ -29,8 +29,8 @@ if [[ ! -f "${requirements_state}" ]] ||
 fi
 
 if ! "${venv_python}" -I -c \
-    'import importlib.metadata, pathlib, remote_ssh_mcp, ssh_wrapper, sys; expected = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").strip(); assert remote_ssh_mcp.__version__ == expected; assert importlib.metadata.version("remote-ssh-mcp") == expected; assert importlib.metadata.version("ssh-wrapper") == "0.1.0"' \
-    "${version_file}" \
+    'import importlib.metadata, pathlib, remote_ssh_mcp, ssh_wrapper, sys; expected = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").strip(); assert remote_ssh_mcp.__version__ == expected; assert importlib.metadata.version("remote-ssh-mcp") == expected; assert importlib.metadata.version("ssh-wrapper") == next(line.split("==", 1)[1].split()[0] for line in pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").splitlines() if line.startswith("ssh-wrapper=="))' \
+    "${version_file}" "${requirements_file}" \
     >/dev/null 2>&1; then
     printf 'Runtime environment is invalid; run: make runtime-venv\n' >&2
     exit 1

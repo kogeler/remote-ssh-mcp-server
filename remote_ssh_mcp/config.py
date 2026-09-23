@@ -37,6 +37,7 @@ MAX_COMMAND_TIMEOUT = 86_400.0
 MIN_OUTPUT_BYTES = 1_024
 MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 MAX_TRANSFERS = 16
+MAX_SESSIONS = 32
 _RUNTIME_ROOT_MARKERS = (".version", "requirements.txt", "remote-ssh-mcp")
 
 
@@ -110,6 +111,7 @@ class RuntimeConfig:
     command_timeout: float
     max_output_bytes: int
     max_transfers: int
+    max_sessions: int
     log_level: str
     ssh_path: Path
     rsync_path: Path
@@ -160,6 +162,9 @@ class RuntimeConfig:
             ),
             max_transfers=_bounded_int(
                 "max transfers", args.max_transfers, 1, MAX_TRANSFERS
+            ),
+            max_sessions=_bounded_int(
+                "max sessions", args.max_sessions, 1, MAX_SESSIONS
             ),
             log_level=args.log_level,
             ssh_path=resolve_program("ssh"),

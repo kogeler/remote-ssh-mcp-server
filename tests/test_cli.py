@@ -16,6 +16,8 @@ def test_help_exits_without_required_arguments(
     assert raised.value.code == 0
     output = capsys.readouterr().out
     assert "--connect-timeout" in output
+    assert "--max-sessions" in output
+    assert "transfers per session" in output
     assert "--target" not in output
 
 

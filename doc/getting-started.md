@@ -82,7 +82,7 @@ as `.mcp.json` or use the same command with `--scope project`. Merge the
 [permissions example](examples/claude-code-settings.json) into the appropriate
 Claude settings file. Its names assume the server remains `remote_machine`.
 
-The server starts disconnected. Connect with a trusted OpenSSH alias:
+The server starts without SSH sessions. Connect with a trusted OpenSSH alias:
 
 ```json
 {"ssh_alias":"production-app"}
@@ -96,8 +96,13 @@ or with a direct authority:
 
 `port` is optional in direct mode and defaults to `22`.
 
-Only `connect` may authenticate. Call `disconnect` before changing authority
-or deliberately reconnecting after transport loss.
+Each successful `connect` returns a new `session_id` and a one-time secret
+`session_key`. Pass both to every remote operation of that session; the key is
+never shown again, and `session_list` omits it. One agent can hold sessions to
+several servers, and several agents can share one server process, but each
+remote server can have only one session at a time. Only `connect` may
+authenticate. Call `disconnect` with the `session_id` to reopen a server,
+recover from transport loss, or drop a session whose key was lost.
 
 Some stdio clients remove graphical-session and SSH-agent variables. On Linux,
 the connection library may query logind for the current UID's runtime directory
@@ -121,7 +126,8 @@ system prompt. The MCP protocol accepts no credential or PIN.
 --connect-timeout SECONDS  SSH master deadline, 0.1..900 (default 120)
 --command-timeout SECONDS  command deadline, 0.1..86400 (default 120)
 --max-output-bytes BYTES   per-stream capture, 1024..67108864 (default 1048576)
---max-transfers COUNT      concurrent transfers, 1..16 (default 2)
+--max-transfers COUNT      concurrent transfers per session, 1..16 (default 2)
+--max-sessions COUNT       simultaneously open SSH sessions, 1..32 (default 8)
 --log-level LEVEL          DEBUG, INFO, WARNING, or ERROR (default INFO)
 ```
 
@@ -139,9 +145,14 @@ or sudo approval.
 
 ## Troubleshooting
 
-- `not_connected`: call `connect` first.
-- `already_connected` or `disconnect_required`: disconnect before choosing a
-  different target or retrying after master loss.
+- `session_not_found`: call `connect` first, or use `session_list` to find the
+  current session ID.
+- `invalid_session_key`: pass the key returned by that session's `connect`. If
+  it is lost, `disconnect` the session by ID and connect again.
+- `already_connected`: the server already has a session, whose ID is in the
+  message; disconnect it before reopening or retrying after master loss.
+- `session_limit_reached`: disconnect an unused session or raise
+  `--max-sessions`.
 - `connection_start_failed`: run ordinary OpenSSH with the same target and
   resolve host-key, token, proxy, or network errors locally.
 - An error saying no usable interactive system prompt is available means the
@@ -149,7 +160,7 @@ or sudo approval.
   recovery did not find one. Start a normal graphical user session and import
   its environment into the user systemd manager; do not copy display or socket
   paths into shared MCP configuration.
-- `connection_lost`: disconnect, then reconnect only when another
+- `connection_lost`: disconnect that session, then reconnect only when another
   authentication is intended.
 - `sudo_password_required`: add an appropriately narrow NOPASSWD rule or avoid
   `sudo_exec`; cached authentication is deliberately ignored.

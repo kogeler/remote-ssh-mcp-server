@@ -16,6 +16,7 @@ def runtime_config(tmp_path: Path) -> RuntimeConfig:
             command_timeout=2.0,
             max_output_bytes=64 * 1024,
             max_transfers=2,
+            max_sessions=4,
             log_level="DEBUG",
         ),
         repository_root=tmp_path,

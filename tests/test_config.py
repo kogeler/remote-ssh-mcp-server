@@ -168,8 +168,23 @@ def test_repository_uses_existing_filesystem_permissions(
         ("--max-output-bytes", "12"),
         ("--max-transfers", "0"),
         ("--max-transfers", "17"),
+        ("--max-sessions", "0"),
+        ("--max-sessions", "33"),
     ],
 )
 def test_limits_are_bounded(tmp_path: Path, option: str, value: str) -> None:
     with pytest.raises(RemoteMCPError, match="must be between"):
         RuntimeConfig.from_namespace(namespace(option, value), repository_root=tmp_path)
+
+
+def test_session_and_transfer_limits_default_and_accept_bounds(tmp_path: Path) -> None:
+    defaults = RuntimeConfig.from_namespace(namespace(), repository_root=tmp_path)
+    assert defaults.max_sessions == 8
+    assert defaults.max_transfers == 2
+
+    bounded = RuntimeConfig.from_namespace(
+        namespace("--max-sessions", "32", "--max-transfers", "16"),
+        repository_root=tmp_path,
+    )
+    assert bounded.max_sessions == 32
+    assert bounded.max_transfers == 16
