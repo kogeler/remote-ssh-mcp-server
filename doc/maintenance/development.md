@@ -18,8 +18,8 @@ After the locked development environment is prepared, `make package` builds
 both wheel and source archive without build isolation or network access. It
 installs the wheel into a clean target and runs the declared console entry
 point from that artifact, outside the source directory. The gate also proves
-that an operational console launch resolves the marked parent of the active
-project venv, never the artifact's `site-packages` path. Editable imports alone
+that an operational console launch resolves the marked project owning the
+active machine-scoped venv, never the artifact's `site-packages` path. Editable imports alone
 are never packaging evidence.
 
 `make docs-audit` prepares the dedicated generated-lock environment, renders

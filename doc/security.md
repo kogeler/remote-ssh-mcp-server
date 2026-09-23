@@ -65,18 +65,29 @@ free-form caller text that other agents would read.
 
 Every model-selected local path is relative to one explicit local root shared
 by all sessions: the source project which owns the prepared venv, or the
-directory containing a standalone executable. Traversal, NULs, protected internal paths, and symlink escapes are
-rejected. Spools and transfer partials use private directories and restrictive
+directory containing a standalone executable. Traversal, NULs, protected
+internal paths, and symlink escapes are rejected. Spools and transfer partials use private directories and restrictive
 creation modes. Normal access controls of the current local user remain the
 outer trust boundary.
 
 The launcher validates and starts the prepared runtime with Python isolated
 mode, so inherited `PYTHONPATH` and user-site packages cannot replace locked
 dependencies. The installed module verifies that its active virtual
-environment is a direct child of the marked MCP project, then uses that parent
-as the local filesystem boundary. The project's `.version` must match the
+environment lives in the marked MCP project's `.venvs/<machine-user-key>/`
+directory for this machine and user, then uses that project as the local
+filesystem boundary. The project's `.version` must match the
 active package. It never treats `site-packages`, the caller's working
 directory, or an ambient import path as that boundary.
+
+Source-checkout environments are scoped to the local machine and UID. The
+namespace uses HMAC-SHA-256 with a fixed application-specific key over
+`/etc/machine-id` and the UID, following the
+[systemd machine-ID guidance](https://www.freedesktop.org/software/systemd/man/latest/machine-id.html).
+Neither the raw machine ID nor a substring is placed in directory names or
+diagnostics. Missing, invalid, or uninitialized IDs fail closed without falling
+back to another host's venv. This is environment isolation for checkouts shared
+across machines, not protection against another trusted user with write access
+to the checkout or against systems cloned with identical machine IDs.
 
 The standalone executable ignores inherited Python import paths. Its local
 root comes from the public executable path, never PyInstaller's temporary

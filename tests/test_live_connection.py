@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from tests.live_support.connection import known_host_name, write_ssh_config
+from tests.live_support.connection import (
+    known_host_name,
+    prepare_host_server_repository,
+    write_ssh_config,
+)
 from tests.live_support.process import SECONDARY_TARGET_ALIAS, TARGET_ALIAS
 
 
@@ -61,3 +65,22 @@ def test_secondary_alias_is_a_distinct_hostname_with_the_primary_host_key(
         assert "stricthostkeychecking true" in settings
         assert "identityagent none" in settings
         assert f"identityfile {identity}" in settings
+
+
+@pytest.mark.host
+def test_host_workspace_owns_its_runtime_and_local_root(tmp_path: Path) -> None:
+    """The hardware-key matrix serves files from its own disposable workspace."""
+    repository = prepare_host_server_repository(tmp_path)
+    launcher = repository / "remote-ssh-mcp"
+
+    version = subprocess.run(
+        [launcher, "--version"], capture_output=True, check=False, text=True
+    )
+    assert version.returncode == 0, version.stderr
+    served = subprocess.run(
+        [launcher], input="", capture_output=True, check=False, text=True
+    )
+
+    assert served.returncode == 0, served.stderr
+    assert (repository / ".remote-ssh-mcp/partials").is_dir()
+    assert not (repository / ".venvs").is_symlink()

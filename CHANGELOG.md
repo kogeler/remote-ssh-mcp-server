@@ -28,6 +28,11 @@ SSH transport library have their own changelog.
 - Made `invalid_arguments` errors name the missing or invalid schema fields,
   for example a missing `session_id` and `session_key`, without repeating
   argument values or unknown field names.
+- Isolated all checkout Python environments beneath `.venvs/` by an
+  application-specific hash of the OS machine ID and local UID, shared by Make
+  and the repository launcher, so one checkout on a network drive can be used
+  from several machines. Missing or invalid machine IDs fail closed; legacy
+  root-level environments and other machines' venvs are left untouched.
 - Updated the runtime to the published `ssh-wrapper==0.1.1` and `mcp==2.2.0`;
   closing a session that is still authenticating relies on the wrapper's
   cancellable master startup.
@@ -53,6 +58,9 @@ SSH transport library have their own changelog.
   the live harness from requiring a hard-coded `ssh-wrapper` version; they now
   read the exact version from the hash locks, so the launcher accepts the
   locked `ssh-wrapper==0.1.1` runtime.
+- Made the hardware-key live harness give its disposable server workspace the
+  project version and its own copy of the prepared runtime, so the launcher
+  starts there and serves files from that workspace.
 - Closed a command-cancellation race that could detach the channel-loss
   watcher before its PID was registered, leaving a blocked FIFO reader or its
   private runtime directory behind.

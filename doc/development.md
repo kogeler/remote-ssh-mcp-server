@@ -16,12 +16,26 @@ make check
 The runtime environment is separate from development tooling. The launcher
 checks its recorded runtime lock and project version but never creates or
 modifies the environment.
+
+All Make environments live beneath `.venvs/<machine-user-key>/`; the
+standard-library-only `remote_ssh_mcp/machine.py` selects the same namespace for
+Make and the repository launcher before any venv exists. It runs with isolated
+`/usr/bin/python3` and uses an application-specific hash of `/etc/machine-id`
+and the local UID, independently of the checkout path, hostname, or boot.
+Checkouts shared across machines cannot reuse another machine's Python or
+native extensions. A missing or invalid OS identity fails explicitly instead
+of selecting a common directory. Cloned systems must have distinct OS machine
+IDs. Old root-level venvs are neither reused nor migrated or deleted.
+`make clean` removes environments only from the current machine/user
+namespace. The complete `.venvs/` tree is excluded from Git and container
+payloads. The CPython 3.13 compatibility image includes Make and the
+distribution's `/usr/bin/python3` to exercise the real pre-venv bootstrap.
 Unit tests use fake programs and must not access the network or a real SSH
 identity.
 
 The production launcher executes the installed module with Python isolated
-mode. That module derives the local file boundary from the marked project which
-directly owns the active venv. A global interpreter, a detached venv, the
+mode. That module derives the local file boundary from the marked project
+whose `.venvs/<machine-user-key>/` directory owns the active venv. A global interpreter, a detached venv, the
 current directory, and the package's `site-packages` location are not accepted
 as substitute roots.
 

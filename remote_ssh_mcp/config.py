@@ -19,6 +19,7 @@ from ssh_wrapper.connection import (
 
 from . import __version__
 from .errors import RemoteMCPError
+from .machine import VENV_NAMESPACE_DIRECTORY, MachineIdentityError, environment_key
 
 __all__ = [
     "ConnectionMode",
@@ -42,7 +43,7 @@ _RUNTIME_ROOT_MARKERS = (".version", "requirements.txt", "remote-ssh-mcp")
 
 
 def runtime_repository_root() -> Path:
-    """Resolve the project root which owns the active virtual environment."""
+    """Resolve the project owning the active venv in this machine's namespace."""
     try:
         prefix = Path(sys.prefix).resolve(strict=True)
         base_prefix = Path(sys.base_prefix).resolve(strict=True)
@@ -57,7 +58,22 @@ def runtime_repository_root() -> Path:
             "remote-ssh-mcp requires a project-owned virtual environment",
         )
 
-    root = prefix.parent
+    namespace = prefix.parent
+    if namespace.parent.name != VENV_NAMESPACE_DIRECTORY:
+        raise RemoteMCPError(
+            "invalid_configuration",
+            "the active virtual environment is not a machine-scoped project environment",
+        )
+    try:
+        key = environment_key()
+    except MachineIdentityError as error:
+        raise RemoteMCPError("invalid_configuration", str(error)) from error
+    if namespace.name != key:
+        raise RemoteMCPError(
+            "invalid_configuration",
+            "the active virtual environment belongs to another machine or user",
+        )
+    root = namespace.parent.parent
     for name in _RUNTIME_ROOT_MARKERS:
         try:
             mode = (root / name).lstat().st_mode

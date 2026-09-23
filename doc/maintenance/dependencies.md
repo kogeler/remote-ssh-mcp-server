@@ -14,12 +14,12 @@ setuptools range expresses a backend capability; the exact setuptools used by
 project commands remains pinned in `requirements-dev.in`.
 
 `requirements-standalone.txt` contains the runtime graph plus the exact
-PyInstaller toolchain. It is installed only into `venv-standalone/`; the
-ordinary source runtime does not carry a bundler.
+PyInstaller toolchain. It is installed only into the machine-scoped
+`venv-standalone/`; the ordinary source runtime does not carry a bundler.
 
 `requirements-docs.txt` contains the runtime graph plus the exact MkDocs
-Material toolchain. It is installed only into `venv-docs/` and owns both local
-site rendering and the Pages build.
+Material toolchain. It is installed only into the machine-scoped `venv-docs/`
+and owns both local site rendering and the Pages build.
 
 `.github/dependency-review-config.yml` is the single license policy consumed
 by GitHub Dependency Review and the local `make licenses` gate. Globally

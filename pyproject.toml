@@ -27,7 +27,14 @@ python_version = "3.13"
 strict = true
 
 [tool.bandit]
-exclude_dirs = ["tests", "venv-runtime", "venv-dev", "venv-lint", "venv-docs"]
+exclude_dirs = [
+    "tests",
+    ".venvs",
+    "venv-runtime",
+    "venv-dev",
+    "venv-lint",
+    "venv-docs",
+]
 skips = ["B101"]
 
 [tool.coverage.run]

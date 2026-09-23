@@ -4,11 +4,17 @@ SHELL := /bin/bash
 .NOTPARALLEL:
 
 SYSTEM_PYTHON ?= python3
-RUNTIME_VENV := venv-runtime
-DEV_VENV := venv-dev
-LINT_VENV := venv-lint
-STANDALONE_VENV := venv-standalone
-DOCS_VENV := venv-docs
+# Every environment lives under one machine/user namespace so a checkout shared
+# across machines never reuses another host's interpreter or native extensions.
+VENV_ROOT := $(shell /usr/bin/python3 -I remote_ssh_mcp/machine.py)
+ifeq ($(VENV_ROOT),)
+$(error Cannot select machine-specific environments; check /etc/machine-id)
+endif
+RUNTIME_VENV := $(VENV_ROOT)/venv-runtime
+DEV_VENV := $(VENV_ROOT)/venv-dev
+LINT_VENV := $(VENV_ROOT)/venv-lint
+STANDALONE_VENV := $(VENV_ROOT)/venv-standalone
+DOCS_VENV := $(VENV_ROOT)/venv-docs
 RUNTIME_PYTHON := $(RUNTIME_VENV)/bin/python
 DEV_PYTHON := $(DEV_VENV)/bin/python
 LINT_PYTHON := $(LINT_VENV)/bin/python
@@ -405,7 +411,7 @@ audit-raw: dev-venv
 	@$(DEV_PYTHON) -m pip_audit --local --strict
 
 licenses: runtime-venv dev-venv lint-venv standalone-venv docs-venv
-	@$(DEV_PYTHON) .github/scripts/license_policy.py
+	@$(DEV_PYTHON) .github/scripts/license_policy.py --venv-root '$(VENV_ROOT)'
 
 outdated: dev-venv
 	@$(DEV_PYTHON) -m pip list --outdated

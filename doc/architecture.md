@@ -104,6 +104,7 @@ survive server restart.
 
 - `remote_ssh_mcp/cli.py` owns command-line parsing and entry behavior.
 - `remote_ssh_mcp/config.py` validates MCP limits and selects the local root.
+- `remote_ssh_mcp/machine.py` derives the machine/user environment namespace.
 - `remote_ssh_mcp/server.py` owns tool registration, annotations, strict
   schemas, and the public error boundary.
 - `remote_ssh_mcp/sessions.py` owns keyed session lifecycle, server identity,
@@ -137,9 +138,13 @@ survive server restart.
 - Rsync streams and resumes large files without carrying their bytes in MCP.
 - `sudo -n -k` requires an explicit NOPASSWD policy on every invocation.
 - Explicit runtime installation keeps dependency mutation out of launch.
-- The verified parent of the active project-owned venv is the only implicit
-  local filesystem boundary; its project version must match the active package,
-  and package installation paths are never boundaries.
+- The marked project owning the active venv in its machine-scoped
+  `.venvs/<machine-user-key>/` directory is the only implicit local filesystem
+  boundary; its project version must match the active package, and package
+  installation paths are never boundaries.
+- Make and the launcher select that namespace with the standard-library-only
+  `remote_ssh_mcp/machine.py` before any venv exists, so a checkout shared
+  across machines never runs another host's interpreter or native extensions.
 - A standalone executable instead receives its own containing directory as an
   explicit local boundary; PyInstaller's temporary extraction directory and
   the caller's current directory are never used.

@@ -17,16 +17,12 @@ from packaging.licenses import InvalidLicenseExpression, canonicalize_license_ex
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_POLICY = ROOT / ".github" / "dependency-review-config.yml"
-DEFAULT_ENVIRONMENTS = (
-    ("runtime", ROOT / "requirements.txt", ROOT / "venv-runtime/bin/python"),
-    ("development", ROOT / "requirements-dev.txt", ROOT / "venv-dev/bin/python"),
-    ("lint", ROOT / "requirements-lint.txt", ROOT / "venv-lint/bin/python"),
-    (
-        "standalone",
-        ROOT / "requirements-standalone.txt",
-        ROOT / "venv-standalone/bin/python",
-    ),
-    ("documentation", ROOT / "requirements-docs.txt", ROOT / "venv-docs/bin/python"),
+LOCK_ENVIRONMENTS = (
+    ("runtime", "requirements.txt", "venv-runtime"),
+    ("development", "requirements-dev.txt", "venv-dev"),
+    ("lint", "requirements-lint.txt", "venv-lint"),
+    ("standalone", "requirements-standalone.txt", "venv-standalone"),
+    ("documentation", "requirements-docs.txt", "venv-docs"),
 )
 POLICY_KEYS = {
     "allow-dependencies-licenses",
@@ -372,10 +368,25 @@ def _audit_packages(
     return len(unique), frozenset(used_exceptions)
 
 
+def lock_environments(venv_root: Path) -> tuple[tuple[str, Path, Path], ...]:
+    """Pair every lock with its prepared environment in one machine namespace."""
+    root = venv_root if venv_root.is_absolute() else ROOT / venv_root
+    return tuple(
+        (label, ROOT / lock, root / environment / "bin/python")
+        for label, lock, environment in LOCK_ENVIRONMENTS
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--policy", type=Path, default=DEFAULT_POLICY)
-    parser.add_argument(
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
+        "--venv-root",
+        type=Path,
+        help="machine-scoped directory containing the prepared lock environments",
+    )
+    source.add_argument(
         "--inventory",
         type=Path,
         help="audit a deterministic JSON inventory instead of local lock environments",
@@ -389,7 +400,7 @@ def _run(arguments: argparse.Namespace) -> None:
         packages = _load_inventory(arguments.inventory)
     else:
         packages = []
-        for label, lock, python in DEFAULT_ENVIRONMENTS:
+        for label, lock, python in lock_environments(arguments.venv_root):
             packages.extend(_environment_inventory(label, lock, python))
     count, used_exceptions = _audit_packages(packages, allowed, exceptions)
     stale = sorted(exceptions - used_exceptions)

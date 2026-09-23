@@ -35,22 +35,31 @@ remote-ssh-mcp --help
 `make runtime-venv` resolves the exact published SSH library from PyPI and
 installs every third-party dependency as a hash-locked binary package. It then
 installs this checkout without dependencies. The target records the installed
-lock beside `venv-runtime/`, verifies package metadata with `pip check`, and
+lock inside `venv-runtime/`, verifies package metadata with `pip check`, and
 removes pip from the completed runtime. Development tools are not installed
 there.
+
+Every environment lives beneath `.venvs/<machine-user-key>/`. Make and the
+launcher select this directory automatically from an application-specific hash
+of `/etc/machine-id` and the local UID, so each machine prepares its own
+environments in a checkout shared across machines, such as a network drive.
+Run the same `make runtime-venv` command once on each machine; do not activate
+a venv manually. A missing or invalid machine ID fails instead of selecting a
+shared directory. Old root-level `venv-*` environments are ignored and left
+untouched; remove them manually when no longer needed.
 
 The launcher does not run pip and does not repair a missing or stale
 environment. It verifies the recorded runtime lock, the recorded project
 version, the installed MCP distribution, and the installed SSH distribution,
-then executes the installed MCP module with
-`venv-runtime/bin/python -I -m remote_ssh_mcp`. It imports the installed SSH
+then executes the installed MCP module with that environment's
+`bin/python -I -m remote_ssh_mcp`. It imports the installed SSH
 distribution; the caller's current directory and inherited `PYTHONPATH` do not
 select application code. Both the validation probe and server entry point use
 Python isolated mode.
 
-For a source checkout, the active virtual environment must be a direct child
-of this project, and the project must contain its launcher, version, and
-runtime-lock files. The server uses that verified venv owner as the local file
+For a source checkout, the active virtual environment must live in this
+machine's `.venvs/<machine-user-key>/` directory of the project, and the project
+must contain its launcher, version, and runtime-lock files. The server uses that verified venv owner as the local file
 boundary. It refuses a global Python environment or a venv detached from the
 project instead of deriving a boundary from the installed package under
 `site-packages`. It also rejects a project `.version` that does not match the

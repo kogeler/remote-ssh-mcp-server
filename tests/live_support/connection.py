@@ -8,6 +8,7 @@ import shutil
 import sys
 from pathlib import Path, PurePosixPath
 
+from remote_ssh_mcp.machine import repository_venv_root
 from tools import container_payload
 
 from .process import (
@@ -204,10 +205,17 @@ def prepare_host_server_repository(test_dir: Path) -> Path:
     repository = workspace / "remote_ssh_mcp"
     repository.mkdir(mode=0o700)
     (repository / "downloads").mkdir(mode=0o700)
-    for name in ("remote-ssh-mcp", "remote-ssh-mcp.py", "requirements.txt"):
+    for name in (".version", "remote-ssh-mcp", "remote-ssh-mcp.py", "requirements.txt"):
         shutil.copy2(TOOL_ROOT / name, repository / name)
-    for name in ("remote_ssh_mcp", "venv-runtime"):
-        (repository / name).symlink_to(TOOL_ROOT / name, target_is_directory=True)
+    (repository / "remote_ssh_mcp").symlink_to(
+        TOOL_ROOT / "remote_ssh_mcp", target_is_directory=True
+    )
+    # The local root is the project owning the active venv, so the workspace gets
+    # its own copy of this machine's prepared runtime instead of a symlink.
+    runtime = repository_venv_root() / "venv-runtime"
+    if not (TOOL_ROOT / runtime / "bin/python").is_file():
+        raise LiveFailure("the runtime environment is missing; run make runtime-venv")
+    shutil.copytree(TOOL_ROOT / runtime, repository / runtime, symlinks=True)
     return repository
 
 

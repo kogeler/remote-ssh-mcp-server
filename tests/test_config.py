@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 import remote_ssh_mcp.config as config_module
+from remote_ssh_mcp import machine
 from remote_ssh_mcp.cli import build_parser
 from remote_ssh_mcp.config import (
     ConnectionSpec,
@@ -31,9 +32,17 @@ def test_runtime_config_resolves_root_and_programs(tmp_path: Path) -> None:
     assert config.rsync_path.is_absolute()
 
 
+@pytest.fixture(autouse=True)
+def fixed_machine_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    identity = tmp_path / "machine-id"
+    identity.write_text("0123456789abcdef" * 2 + "\n", encoding="ascii")
+    monkeypatch.setattr(machine, "MACHINE_ID_FILE", identity)
+    return identity
+
+
 def _runtime_project(tmp_path: Path) -> tuple[Path, Path]:
     root = tmp_path / "project"
-    prefix = root / "environment"
+    prefix = root / machine.repository_venv_root() / "venv-runtime"
     prefix.mkdir(parents=True)
     (root / ".version").write_text(f"{config_module.__version__}\n", encoding="utf-8")
     for name in ("requirements.txt", "remote-ssh-mcp"):
@@ -79,6 +88,40 @@ def test_runtime_root_rejects_mismatched_project_version(
 
     with pytest.raises(RemoteMCPError, match="package version does not match"):
         runtime_repository_root()
+
+
+@pytest.mark.parametrize(
+    ("layout", "message"),
+    [
+        ("legacy", "not a machine-scoped project environment"),
+        ("other-machine", "belongs to another machine or user"),
+        ("invalid-identity", "invalid or uninitialized"),
+    ],
+)
+def test_runtime_root_accepts_only_this_machine_namespace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fixed_machine_identity: Path,
+    layout: str,
+    message: str,
+) -> None:
+    root, prefix = _runtime_project(tmp_path)
+    if layout == "legacy":
+        prefix = root / "venv-runtime"
+    elif layout == "other-machine":
+        prefix = root / ".venvs" / ("f" * 64) / "venv-runtime"
+    else:
+        fixed_machine_identity.write_text("uninitialized\n", encoding="ascii")
+    prefix.mkdir(parents=True, exist_ok=True)
+    base_prefix = tmp_path / "base-python"
+    base_prefix.mkdir()
+    monkeypatch.setattr(config_module.sys, "prefix", str(prefix))
+    monkeypatch.setattr(config_module.sys, "base_prefix", str(base_prefix))
+
+    with pytest.raises(RemoteMCPError, match=message) as raised:
+        runtime_repository_root()
+    assert raised.value.code == "invalid_configuration"
+    assert "0123456789abcdef" not in raised.value.message
 
 
 @pytest.mark.parametrize("invalid_marker", ["missing", "directory", "symlink"])

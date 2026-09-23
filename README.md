@@ -58,8 +58,12 @@ remote-ssh-mcp --help
 
 `make runtime-venv` is a required, explicit installation step. It installs all
 third-party dependencies as hash-verified binary packages, installs this
-checkout without dependencies into `venv-runtime/`, verifies the exact
-published `ssh-wrapper` dependency, and removes pip from the completed runtime.
+checkout without dependencies into `.venvs/<machine-user-key>/venv-runtime/`,
+verifies the exact published `ssh-wrapper` dependency, and removes pip from the
+completed runtime. Make and the launcher select that directory automatically
+from an application-specific hash of `/etc/machine-id` and the local UID, so a
+checkout shared across machines, for example on a network drive, keeps a
+separate environment per machine: run `make runtime-venv` once on each machine.
 The launcher never installs or updates packages and refuses a missing or stale
 environment. Its state is bound to both `requirements.txt` and the project
 `.version`, so a dependency or product-version change requires an explicit

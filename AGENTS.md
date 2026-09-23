@@ -12,6 +12,11 @@ tree. The SSH runtime library is the exact published
   session lifecycle and server identity.
 - `remote-ssh-mcp` validates the explicit runtime environment and executes the
   installed module in isolated mode.
+- `remote_ssh_mcp/machine.py` selects the machine/user namespace for all Make
+  and repository-launcher venvs beneath `.venvs/`. Keep it standard-library-only,
+  runnable with isolated `/usr/bin/python3` before any venv exists, fail closed
+  on invalid OS identity, and never reuse or remove another machine's
+  environments or legacy root-level venvs.
 - `remote-ssh-mcp.py` is the explicit-root entry point used by streamed live
   payloads.
 - `tests/` contains MCP adapter, protocol, command, sudo, transfer, and
@@ -79,7 +84,8 @@ tree. The SSH runtime library is the exact published
 - The prepared runtime is bound to both `requirements.txt` and `.version`.
   Never replace this with a hard-coded Remote SSH MCP version in the launcher
   or Makefile.
-- An implicit runtime root is only the marked project directly owning the
+- An implicit runtime root is only the marked project whose
+  `.venvs/<machine-user-key>/` directory for this machine and user owns the
   active venv, and its `.version` must match the active package. Never derive
   the local boundary from `site-packages` or cwd.
 - Every external workflow action is pinned to one full commit SHA. Default
