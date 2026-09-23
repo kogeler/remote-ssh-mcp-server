@@ -263,6 +263,9 @@ class CommandRunner:
         self._process_lock = asyncio.Lock()
         self._closed = False
 
+    def active_count(self) -> int:
+        return len(self._processes)
+
     @staticmethod
     def _validate_script(script: str) -> bytes:
         if not isinstance(script, str) or not script.strip():

@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 
 from .process import (
+    CONTAINER_SECONDARY_TARGET_HOST,
+    CONTAINER_TARGET_HOST,
     OWNER_LABEL,
     RUN_LABEL,
     LiveFailure,
@@ -169,7 +171,14 @@ def provision_target(
     resources.target_name = name
     network_options = ["--publish", f"127.0.0.1::{ssh_port}"]
     if network is not None:
-        network_options = ["--network", network, "--network-alias", "live-target"]
+        network_options = [
+            "--network",
+            network,
+            "--network-alias",
+            CONTAINER_TARGET_HOST,
+            "--network-alias",
+            CONTAINER_SECONDARY_TARGET_HOST,
+        ]
     print("live: creating the disposable test container", file=sys.stderr)
     checked(
         [

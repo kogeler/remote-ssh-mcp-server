@@ -16,12 +16,26 @@ make check
 The runtime environment is separate from development tooling. The launcher
 checks its recorded runtime lock and project version but never creates or
 modifies the environment.
+
+All Make environments live beneath `.venvs/<machine-user-key>/`; the
+standard-library-only `remote_ssh_mcp/machine.py` selects the same namespace for
+Make and the repository launcher before any venv exists. It runs with isolated
+`/usr/bin/python3` and uses an application-specific hash of `/etc/machine-id`
+and the local UID, independently of the checkout path, hostname, or boot.
+Checkouts shared across machines cannot reuse another machine's Python or
+native extensions. A missing or invalid OS identity fails explicitly instead
+of selecting a common directory. Cloned systems must have distinct OS machine
+IDs. Old root-level venvs are neither reused nor migrated or deleted.
+`make clean` removes environments only from the current machine/user
+namespace. The complete `.venvs/` tree is excluded from Git and container
+payloads. The CPython 3.13 compatibility image includes Make and the
+distribution's `/usr/bin/python3` to exercise the real pre-venv bootstrap.
 Unit tests use fake programs and must not access the network or a real SSH
 identity.
 
 The production launcher executes the installed module with Python isolated
-mode. That module derives the local file boundary from the marked project which
-directly owns the active venv. A global interpreter, a detached venv, the
+mode. That module derives the local file boundary from the marked project
+whose `.venvs/<machine-user-key>/` directory owns the active venv. A global interpreter, a detached venv, the
 current directory, and the package's `site-packages` location are not accepted
 as substitute roots.
 
@@ -57,8 +71,9 @@ make no network requests. Use `make docs-serve` for a local preview; generated
 
 ## Published SSH Dependency
 
-`ssh-wrapper==0.1.0` is resolved from PyPI and bound by SHA-256 in every
-runtime-derived lock: runtime, development, standalone, and documentation.
+The exact `ssh-wrapper` version pinned in `requirements.in` is resolved from
+PyPI and bound by SHA-256 in every runtime-derived lock: runtime, development,
+standalone, and documentation.
 Tests and the launcher import only that installed distribution and never add an
 alternate source directory to `PYTHONPATH`.
 
@@ -86,8 +101,13 @@ make live-test
 The automatic path generates an ephemeral Ed25519 key, creates one private
 Podman network, starts a confined MCP server container and a disposable SSH
 target, and proves command, inspection, sudo, transfer, disconnect, master-loss,
-and selective-cleanup behavior. The harness removes only resources bearing its
-per-run ownership labels.
+independent keyed sessions, and selective-cleanup behavior. A second SSH alias
+reaches the same target through a different effective `HostName`, so the server
+treats it as a second server: the matrix proves one session per server, key
+isolation, parallel sessions, private transfers, and disconnect by ID. The
+harness removes only resources bearing its per-run ownership labels. The
+hardware-key matrix therefore asks for a second PIN or touch when it opens the
+second session.
 
 Hardware-token acceptance keeps the MCP process on the host so OpenSSH can use
 the operator's normal authentication UI:

@@ -91,6 +91,7 @@ def smoke(artifact: Path, *, root: Path) -> None:
             "--command-timeout",
             "--max-output-bytes",
             "--max-transfers",
+            "--max-sessions",
         ):
             if option not in help_output.stdout:
                 raise StandaloneSmokeError(f"standalone help is missing {option}")

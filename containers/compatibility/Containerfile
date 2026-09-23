@@ -9,12 +9,16 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_ROOT_USER_ACTION=ignore \
     PYTHONDONTWRITEBYTECODE=1
 
+# Make and the distribution's /usr/bin/python3 exercise the real pre-venv
+# machine namespace bootstrap shared by the Makefile and the launcher.
 RUN useradd --create-home --uid 1000 --shell /bin/bash box \
     && apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install --yes \
         --no-install-recommends \
+        make \
         openssh-client \
         procps \
+        python3 \
         rsync \
         shellcheck \
         tini \

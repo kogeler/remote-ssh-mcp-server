@@ -26,6 +26,7 @@ from .connection import (
 from .keys import preflight, prepare_key
 from .process import (
     LIVE_RUNNER,
+    SECONDARY_TARGET_ALIAS,
     SERVER_REPOSITORY,
     TARGET_ALIAS,
     Arguments,
@@ -118,6 +119,7 @@ def run_matrix(
             "PODMAN": resources.podman,
             "REMOTE_SSH_MCP_E2E_CONTAINER": target,
             "REMOTE_SSH_MCP_E2E_TARGET": TARGET_ALIAS,
+            "REMOTE_SSH_MCP_E2E_SECONDARY_TARGET": SECONDARY_TARGET_ALIAS,
             "REMOTE_SSH_MCP_E2E_STDERR": str(test_dir / "server.stderr"),
         }
     )

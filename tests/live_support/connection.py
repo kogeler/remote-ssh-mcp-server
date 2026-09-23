@@ -8,11 +8,16 @@ import shutil
 import sys
 from pathlib import Path, PurePosixPath
 
+from remote_ssh_mcp.machine import repository_venv_root
 from tools import container_payload
 
 from .process import (
+    CONTAINER_SECONDARY_TARGET_HOST,
+    CONTAINER_TARGET_HOST,
+    HOST_SECONDARY_TARGET_HOST,
     OWNER_LABEL,
     RUN_LABEL,
+    SECONDARY_TARGET_ALIAS,
     SERVER_HOME,
     TARGET_ALIAS,
     TOOL_ROOT,
@@ -30,34 +35,58 @@ from .process import (
 from .topology import unique_name
 
 
+def locked_wrapper_version() -> str:
+    """Return the exact ssh-wrapper version bound by the runtime lock."""
+    lock = (TOOL_ROOT / "requirements.txt").read_text(encoding="utf-8")
+    for line in lock.splitlines():
+        if line.startswith("ssh-wrapper=="):
+            return line.split("==", 1)[1].split()[0]
+    raise LiveFailure("the runtime lock does not pin ssh-wrapper")
+
+
+def known_host_name(host: str, port: int) -> str:
+    """Return the known_hosts name OpenSSH records for a host and port."""
+    return host if port == 22 else f"[{host}]:{port}"
+
+
 def write_ssh_config(
     path: Path,
     *,
     host: str,
+    secondary_host: str,
     port: int,
     identity: Path,
     known_hosts: Path,
 ) -> None:
     escaped_identity = str(identity).replace("\\", "\\\\").replace('"', '\\"')
+    common = (
+        f"    Port {port}",
+        "    User mcp-test",
+        f'    IdentityFile "{escaped_identity}"',
+        "    IdentitiesOnly yes",
+        "    IdentityAgent none",
+        "    PreferredAuthentications publickey",
+        "    PasswordAuthentication no",
+        "    KbdInteractiveAuthentication no",
+        "    StrictHostKeyChecking yes",
+        f'    UserKnownHostsFile "{known_hosts}"',
+        "    CheckHostIP no",
+        "    UpdateHostKeys no",
+        "    ControlMaster no",
+        "    ControlPersist no",
+    )
     path.write_text(
         "\n".join(
             (
                 f"Host {TARGET_ALIAS}",
                 f"    HostName {host}",
-                f"    Port {port}",
-                "    User mcp-test",
-                f'    IdentityFile "{escaped_identity}"',
-                "    IdentitiesOnly yes",
-                "    IdentityAgent none",
-                "    PreferredAuthentications publickey",
-                "    PasswordAuthentication no",
-                "    KbdInteractiveAuthentication no",
-                "    StrictHostKeyChecking yes",
-                f'    UserKnownHostsFile "{known_hosts}"',
-                "    CheckHostIP no",
-                "    UpdateHostKeys no",
-                "    ControlMaster no",
-                "    ControlPersist no",
+                *common,
+                f"Host {SECONDARY_TARGET_ALIAS}",
+                f"    HostName {secondary_host}",
+                # OpenSSH uses HostKeyAlias verbatim, without appending a port.
+                f"    HostKeyAlias {known_host_name(host, port)}",
+                "    AddressFamily inet",
+                *common,
                 "",
             )
         ),
@@ -89,7 +118,8 @@ def prepare_connection_files(
     known_hosts = test_dir / "known_hosts"
 
     if containerised_server:
-        ssh_host = "live-target"
+        ssh_host = CONTAINER_TARGET_HOST
+        secondary_host = CONTAINER_SECONDARY_TARGET_HOST
         ssh_port = target_port
         known_hosts.write_text(
             f"{ssh_host} {host_key.read_text(encoding='utf-8').strip()}\n",
@@ -109,6 +139,7 @@ def prepare_connection_files(
         if not published.startswith("127.0.0.1:"):
             raise LiveFailure("the target SSH port is not published on loopback")
         ssh_host = "127.0.0.1"
+        secondary_host = HOST_SECONDARY_TARGET_HOST
         try:
             ssh_port = int(published.rsplit(":", 1)[1])
         except ValueError as error:
@@ -139,6 +170,7 @@ def prepare_connection_files(
     write_ssh_config(
         ssh_config,
         host=ssh_host,
+        secondary_host=secondary_host,
         port=ssh_port,
         identity=identity,
         known_hosts=config_known_hosts,
@@ -158,6 +190,7 @@ def prepare_connection_files(
     wrapper.chmod(0o700)
     return ConnectionFiles(
         ssh_host=ssh_host,
+        secondary_ssh_host=secondary_host,
         ssh_port=ssh_port,
         expected_host_key=expected,
         observed_host_key=observed,
@@ -172,10 +205,17 @@ def prepare_host_server_repository(test_dir: Path) -> Path:
     repository = workspace / "remote_ssh_mcp"
     repository.mkdir(mode=0o700)
     (repository / "downloads").mkdir(mode=0o700)
-    for name in ("remote-ssh-mcp", "remote-ssh-mcp.py", "requirements.txt"):
+    for name in (".version", "remote-ssh-mcp", "remote-ssh-mcp.py", "requirements.txt"):
         shutil.copy2(TOOL_ROOT / name, repository / name)
-    for name in ("remote_ssh_mcp", "venv-runtime"):
-        (repository / name).symlink_to(TOOL_ROOT / name, target_is_directory=True)
+    (repository / "remote_ssh_mcp").symlink_to(
+        TOOL_ROOT / "remote_ssh_mcp", target_is_directory=True
+    )
+    # The local root is the project owning the active venv, so the workspace gets
+    # its own copy of this machine's prepared runtime instead of a symlink.
+    runtime = repository_venv_root() / "venv-runtime"
+    if not (TOOL_ROOT / runtime / "bin/python").is_file():
+        raise LiveFailure("the runtime environment is missing; run make runtime-venv")
+    shutil.copytree(TOOL_ROOT / runtime, repository / runtime, symlinks=True)
     return repository
 
 
@@ -360,9 +400,10 @@ def provision_server(
         "-I",
         "-c",
         (
-            "import importlib.metadata, ssh_wrapper; "
-            "assert importlib.metadata.version('ssh-wrapper') == '0.1.0'"
+            "import importlib.metadata, ssh_wrapper, sys; "
+            "assert importlib.metadata.version('ssh-wrapper') == sys.argv[1]"
         ),
+        locked_wrapper_version(),
         purpose="verifying the published SSH wrapper dependency",
     )
     verify_server_confinement(resources, server, network)
@@ -375,22 +416,23 @@ def verify_ssh_settings(
     server: str | None,
 ) -> tuple[str, str]:
     real_ssh = require_program("ssh")
-    if server is not None:
-        settings = podman_exec(
-            resources,
-            server,
-            "ssh",
-            "-G",
-            TARGET_ALIAS,
-            purpose="resolving server-container SSH configuration",
-        ).decode()
-    else:
+
+    def resolve(alias: str) -> str:
+        if server is not None:
+            return podman_exec(
+                resources,
+                server,
+                "ssh",
+                "-G",
+                alias,
+                purpose="resolving server-container SSH configuration",
+            ).decode()
         environment = os.environ.copy()
         environment["PATH"] = f"{connection.wrapper_dir}:{environment['PATH']}"
         environment["REMOTE_SSH_MCP_TEST_SSH_CONFIG"] = str(connection.ssh_config)
         environment["REMOTE_SSH_MCP_TEST_REAL_SSH"] = real_ssh
         completed = run_process(
-            ["ssh", "-G", TARGET_ALIAS],
+            ["ssh", "-G", alias],
             env=environment,
             text=True,
             capture_output=True,
@@ -398,9 +440,9 @@ def verify_ssh_settings(
         )
         if completed.returncode != 0:
             raise LiveFailure("resolving host SSH configuration failed")
-        settings = completed.stdout
-    expected = (
-        f"hostname {connection.ssh_host}",
+        return str(completed.stdout)
+
+    common = (
         f"port {connection.ssh_port}",
         "user mcp-test",
         "stricthostkeychecking true",
@@ -408,10 +450,24 @@ def verify_ssh_settings(
         "passwordauthentication no",
         "kbdinteractiveauthentication no",
     )
-    setting_lines = set(settings.splitlines())
-    for value in expected:
-        if value not in setting_lines:
-            raise LiveFailure(f"SSH setting is not effective: {value}")
+    settings = resolve(TARGET_ALIAS)
+    secondary_settings = resolve(SECONDARY_TARGET_ALIAS)
+    host_key_alias = known_host_name(connection.ssh_host, connection.ssh_port)
+    for resolved, expected in (
+        (settings, (f"hostname {connection.ssh_host}", *common)),
+        (
+            secondary_settings,
+            (
+                f"hostname {connection.secondary_ssh_host}",
+                f"hostkeyalias {host_key_alias}",
+                *common,
+            ),
+        ),
+    ):
+        setting_lines = set(resolved.splitlines())
+        for value in expected:
+            if value not in setting_lines:
+                raise LiveFailure(f"SSH setting is not effective: {value}")
     return real_ssh, settings
 
 

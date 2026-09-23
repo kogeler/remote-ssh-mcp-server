@@ -4,11 +4,17 @@ SHELL := /bin/bash
 .NOTPARALLEL:
 
 SYSTEM_PYTHON ?= python3
-RUNTIME_VENV := venv-runtime
-DEV_VENV := venv-dev
-LINT_VENV := venv-lint
-STANDALONE_VENV := venv-standalone
-DOCS_VENV := venv-docs
+# Every environment lives under one machine/user namespace so a checkout shared
+# across machines never reuses another host's interpreter or native extensions.
+VENV_ROOT := $(shell /usr/bin/python3 -I remote_ssh_mcp/machine.py)
+ifeq ($(VENV_ROOT),)
+$(error Cannot select machine-specific environments; check /etc/machine-id)
+endif
+RUNTIME_VENV := $(VENV_ROOT)/venv-runtime
+DEV_VENV := $(VENV_ROOT)/venv-dev
+LINT_VENV := $(VENV_ROOT)/venv-lint
+STANDALONE_VENV := $(VENV_ROOT)/venv-standalone
+DOCS_VENV := $(VENV_ROOT)/venv-docs
 RUNTIME_PYTHON := $(RUNTIME_VENV)/bin/python
 DEV_PYTHON := $(DEV_VENV)/bin/python
 LINT_PYTHON := $(LINT_VENV)/bin/python
@@ -95,7 +101,7 @@ runtime-venv:
 		[[ ! -f '$(RUNTIME_VENV)/.version' ]] || \
 		! cmp -s requirements.txt '$(RUNTIME_VENV)/.requirements.txt' || \
 		! cmp -s .version '$(RUNTIME_VENV)/.version' || \
-		! '$(RUNTIME_PYTHON)' -c 'import importlib.metadata, pathlib, remote_ssh_mcp, ssh_wrapper; expected = pathlib.Path(".version").read_text(encoding="utf-8").strip(); assert remote_ssh_mcp.__version__ == expected; assert importlib.metadata.version("remote-ssh-mcp") == expected; assert importlib.metadata.version("ssh-wrapper") == "0.1.0"' >/dev/null 2>&1 || \
+		! '$(RUNTIME_PYTHON)' -c 'import importlib.metadata, pathlib, remote_ssh_mcp, ssh_wrapper; expected = pathlib.Path(".version").read_text(encoding="utf-8").strip(); assert remote_ssh_mcp.__version__ == expected; assert importlib.metadata.version("remote-ssh-mcp") == expected; assert importlib.metadata.version("ssh-wrapper") == next(line.split("==", 1)[1].split()[0] for line in pathlib.Path("requirements.txt").read_text(encoding="utf-8").splitlines() if line.startswith("ssh-wrapper=="))' >/dev/null 2>&1 || \
 		'$(RUNTIME_PYTHON)' -c 'import pip' >/dev/null 2>&1; then \
 		if [[ -e '$(RUNTIME_VENV)' ]]; then \
 			find '$(RUNTIME_VENV)' -depth -delete; \
@@ -115,7 +121,7 @@ dev-venv:
 	@if [[ ! -x '$(DEV_PYTHON)' ]] || \
 		[[ ! -f '$(DEV_VENV)/.requirements-dev.txt' ]] || \
 		! cmp -s requirements-dev.txt '$(DEV_VENV)/.requirements-dev.txt' || \
-		! '$(DEV_PYTHON)' -c 'import importlib.metadata, pip, ssh_wrapper; assert importlib.metadata.version("ssh-wrapper") == "0.1.0"' >/dev/null 2>&1; then \
+		! '$(DEV_PYTHON)' -c 'import importlib.metadata, pathlib, pip, ssh_wrapper; assert importlib.metadata.version("ssh-wrapper") == next(line.split("==", 1)[1].split()[0] for line in pathlib.Path("requirements-dev.txt").read_text(encoding="utf-8").splitlines() if line.startswith("ssh-wrapper=="))' >/dev/null 2>&1; then \
 		if [[ -e '$(DEV_VENV)' ]]; then find '$(DEV_VENV)' -depth -delete; fi; \
 		'$(SYSTEM_PYTHON)' -m venv '$(DEV_VENV)'; \
 		'$(DEV_PYTHON)' -m pip install --quiet --require-hashes \
@@ -405,7 +411,7 @@ audit-raw: dev-venv
 	@$(DEV_PYTHON) -m pip_audit --local --strict
 
 licenses: runtime-venv dev-venv lint-venv standalone-venv docs-venv
-	@$(DEV_PYTHON) .github/scripts/license_policy.py
+	@$(DEV_PYTHON) .github/scripts/license_policy.py --venv-root '$(VENV_ROOT)'
 
 outdated: dev-venv
 	@$(DEV_PYTHON) -m pip list --outdated

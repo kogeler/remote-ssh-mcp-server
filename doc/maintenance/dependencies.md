@@ -14,12 +14,12 @@ setuptools range expresses a backend capability; the exact setuptools used by
 project commands remains pinned in `requirements-dev.in`.
 
 `requirements-standalone.txt` contains the runtime graph plus the exact
-PyInstaller toolchain. It is installed only into `venv-standalone/`; the
-ordinary source runtime does not carry a bundler.
+PyInstaller toolchain. It is installed only into the machine-scoped
+`venv-standalone/`; the ordinary source runtime does not carry a bundler.
 
 `requirements-docs.txt` contains the runtime graph plus the exact MkDocs
-Material toolchain. It is installed only into `venv-docs/` and owns both local
-site rendering and the Pages build.
+Material toolchain. It is installed only into the machine-scoped `venv-docs/`
+and owns both local site rendering and the Pages build.
 
 `.github/dependency-review-config.yml` is the single license policy consumed
 by GitHub Dependency Review and the local `make licenses` gate. Globally
@@ -50,9 +50,10 @@ declared by wheel metadata. The package exceptions cover that external
 aggregation without granting the same license to unrelated dependencies; they
 do not turn the GitHub action's package-level exception into a per-license one.
 
-`ssh-wrapper==0.1.0` is resolved from PyPI. Every runtime-derived lock—runtime,
-development, standalone, and documentation—binds its published artifact
-hashes, and no source directory is added to `PYTHONPATH`.
+The exact `ssh-wrapper` version pinned in `requirements.in` is resolved from
+PyPI. Every runtime-derived lock—runtime, development, standalone, and
+documentation—binds its published artifact hashes, and no source directory is
+added to `PYTHONPATH`.
 
 Use `make lock` after changing direct dependencies in `requirements*.in` and
 `make refresh-dependencies` for a deliberate whole-tree upgrade. Review every

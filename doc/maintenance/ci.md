@@ -1,8 +1,8 @@
 # Continuous Integration Contract
 
 The workflows under `.github/workflows/` are active at the repository root.
-They never check out another source repository: `ssh-wrapper==0.1.0` is
-resolved only from the hash-locked published dependency graph.
+They never check out another source repository: `ssh-wrapper` is resolved
+only from the hash-locked published dependency graph.
 
 CI grants read-only contents permission by default, pins every external action
 to a full commit SHA, and persists no checkout credentials. The quality job

@@ -15,7 +15,11 @@ from remote_ssh_mcp.config import ConnectionSpec, RuntimeConfig
 from remote_ssh_mcp.errors import RemoteMCPError
 from remote_ssh_mcp.inspection import RemoteInspector
 from remote_ssh_mcp.local_paths import LocalPathPolicy
-from remote_ssh_mcp.transfers import TransferManager, TransferOperation
+from remote_ssh_mcp.transfers import (
+    TransferManager,
+    TransferOperation,
+    TransferReservations,
+)
 
 FAKE_RSYNC = r"""#!__PYTHON__
 import json
@@ -72,10 +76,10 @@ raise SystemExit(0)
 
 
 class LocalTransferMaster:
-    def __init__(self) -> None:
+    def __init__(self, target: str = "test-target") -> None:
         self.ready_checks = 0
         self.fail_after: int | None = None
-        self.connection = ConnectionSpec.from_alias("test-target")
+        self.connection = ConnectionSpec.from_alias(target)
 
     async def ensure_ready(self) -> None:
         self.ready_checks += 1
@@ -432,3 +436,127 @@ async def test_completed_operation_metadata_expires(
     with pytest.raises(RemoteMCPError) as raised:
         await manager.status(str(started["operation_id"]))
     assert raised.value.code == "transfer_not_found"
+
+
+def sibling_manager(
+    manager: TransferManager, target: str = "test-target"
+) -> TransferManager:
+    """Create another session's manager sharing the server-wide reservations."""
+    master = LocalTransferMaster(target)
+    runner = CommandRunner(manager.config, master, manager.paths)  # type: ignore[arg-type]
+    return TransferManager(
+        manager.config,
+        master,  # type: ignore[arg-type]
+        manager.paths,
+        runner,
+        RemoteInspector(runner),
+        reservations=manager.reservations,
+    )
+
+
+@pytest.mark.asyncio
+async def test_sessions_cannot_share_an_active_local_download_destination(
+    transfer_stack, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, _master, _paths, _fake = transfer_stack
+    other = sibling_manager(manager, "other-target")
+    source = tmp_path / "shared-source"
+    source.write_bytes(b"s" * 2_000_000)
+    monkeypatch.setenv("FAKE_RSYNC_DELAY", "0.02")
+
+    first = await manager.start_download(str(source), "shared.bin")
+    with pytest.raises(RemoteMCPError) as conflict:
+        await other.start_download("/remote/elsewhere", "shared.bin")
+    assert conflict.value.code == "transfer_conflict"
+    with pytest.raises(RemoteMCPError) as foreign:
+        await other.status(str(first["operation_id"]))
+    assert foreign.value.code == "transfer_not_found"
+    with pytest.raises(RemoteMCPError) as foreign_cancel:
+        await other.cancel(str(first["operation_id"]))
+    assert foreign_cancel.value.code == "transfer_not_found"
+    assert await other.list() == []
+
+    cancelled = await manager.cancel(str(first["operation_id"]))
+    assert cancelled["state"] == "cancelled"
+    retried = await other.start_download("/remote/elsewhere", "shared.bin")
+    await other.cancel(str(retried["operation_id"]))
+    await other.close()
+
+
+@pytest.mark.asyncio
+async def test_upload_reservations_are_scoped_to_the_ssh_authority(
+    transfer_stack, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, _master, _paths, _fake = transfer_stack
+    same_authority = sibling_manager(manager, "test-target")
+    other_authority = sibling_manager(manager, "other-target")
+    (tmp_path / "upload.bin").write_bytes(b"u" * 2_000_000)
+    remote = tmp_path / "remote-upload.bin"
+    monkeypatch.setenv("FAKE_RSYNC_DELAY", "0.02")
+
+    first = await manager.start_upload("upload.bin", str(remote))
+    with pytest.raises(RemoteMCPError) as conflict:
+        await same_authority.start_upload("upload.bin", str(remote))
+    assert conflict.value.code == "transfer_conflict"
+    independent = await other_authority.start_upload("upload.bin", str(remote))
+
+    await manager.cancel(str(first["operation_id"]))
+    await other_authority.cancel(str(independent["operation_id"]))
+    await same_authority.close()
+
+
+@pytest.mark.asyncio
+async def test_transfer_limit_applies_per_session(
+    transfer_stack, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, _master, _paths, _fake = transfer_stack
+    other = sibling_manager(manager, "other-target")
+    source = tmp_path / "limit-source"
+    source.write_bytes(b"l" * 2_000_000)
+    monkeypatch.setenv("FAKE_RSYNC_DELAY", "0.02")
+
+    started = [
+        await manager.start_download(str(source), name)
+        for name in ("limit-one.bin", "limit-two.bin")
+    ]
+    with pytest.raises(RemoteMCPError) as limited:
+        await manager.start_download(str(source), "limit-three.bin")
+    assert limited.value.code == "transfer_limit_reached"
+    independent = await other.start_download("/remote/other", "limit-three.bin")
+    assert manager.active_count() == 2
+    assert other.active_count() == 1
+
+    for operation in started:
+        await manager.cancel(str(operation["operation_id"]))
+    await other.cancel(str(independent["operation_id"]))
+    assert manager.active_count() == 0
+    await other.close()
+
+
+@pytest.mark.asyncio
+async def test_reservation_is_released_when_cancelled_before_running(
+    transfer_stack, tmp_path: Path
+) -> None:
+    manager, _master, _paths, _fake = transfer_stack
+    reservations = manager.reservations
+    source = tmp_path / "instant-source"
+    source.write_bytes(b"i")
+
+    started = await manager.start_download(str(source), "instant.bin")
+    assert not reservations.claim("download\0instant.bin")
+    cancelled = await manager.cancel(str(started["operation_id"]))
+
+    assert cancelled["state"] == "cancelled"
+    assert reservations.claim("download\0instant.bin")
+    reservations.release("download\0instant.bin")
+
+
+def test_reservations_are_exclusive_until_released() -> None:
+    reservations = TransferReservations()
+
+    assert reservations.claim("download\0a")
+    assert not reservations.claim("download\0a")
+    assert reservations.claim("download\0b")
+    reservations.release("download\0a")
+    reservations.release("download\0missing")
+    assert reservations.claim("download\0a")

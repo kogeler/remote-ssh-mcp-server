@@ -3,13 +3,20 @@
 This repository contains only the Remote SSH MCP project. Do not import application code,
 tests, documentation, tooling, or generated artifacts from another project
 tree. The SSH runtime library is the exact published
-[`ssh-wrapper==0.1.0`](https://pypi.org/project/ssh-wrapper/0.1.0/) dependency.
+[`ssh-wrapper`](https://pypi.org/project/ssh-wrapper/) version pinned in
+`requirements.in`; version checks read it from the hash locks.
 
 ## Project Map
 
-- `remote_ssh_mcp/` contains the Python MCP server.
+- `remote_ssh_mcp/` contains the Python MCP server; `sessions.py` owns keyed
+  session lifecycle and server identity.
 - `remote-ssh-mcp` validates the explicit runtime environment and executes the
   installed module in isolated mode.
+- `remote_ssh_mcp/machine.py` selects the machine/user namespace for all Make
+  and repository-launcher venvs beneath `.venvs/`. Keep it standard-library-only,
+  runnable with isolated `/usr/bin/python3` before any venv exists, fail closed
+  on invalid OS identity, and never reuse or remove another machine's
+  environments or legacy root-level venvs.
 - `remote-ssh-mcp.py` is the explicit-root entry point used by streamed live
   payloads.
 - `tests/` contains MCP adapter, protocol, command, sudo, transfer, and
@@ -43,7 +50,15 @@ tree. The SSH runtime library is the exact published
 ## Invariants
 
 - Startup performs no SSH authentication; only `connect` chooses authority.
-- One server owns at most one OpenSSH master and never reconnects after loss.
+- Each keyed session owns exactly one OpenSSH master and never reconnects
+  after loss. A server holds at most `--max-sessions` sessions and at most one
+  session per effective remote `HostName` and `Port`; a duplicate `connect`
+  fails without authenticating, and reopening requires `disconnect`.
+- `connect` returns a session key exactly once. The server keeps only its
+  digest; keys never appear in listings, errors, logs, or diagnostics. Every
+  operation except `connect`, `disconnect`, and `session_list` requires the
+  matching session ID and key; `disconnect` requires only the session ID.
+- Sessions authenticate one at a time.
 - Every secondary channel is mux-only and cannot authenticate independently.
 - `sudo_exec` always uses `sudo -n -k` and never accepts a password or PIN.
 - Local paths remain relative to the verified project root for the source
@@ -69,7 +84,8 @@ tree. The SSH runtime library is the exact published
 - The prepared runtime is bound to both `requirements.txt` and `.version`.
   Never replace this with a hard-coded Remote SSH MCP version in the launcher
   or Makefile.
-- An implicit runtime root is only the marked project directly owning the
+- An implicit runtime root is only the marked project whose
+  `.venvs/<machine-user-key>/` directory for this machine and user owns the
   active venv, and its `.version` must match the active package. Never derive
   the local boundary from `site-packages` or cwd.
 - Every external workflow action is pinned to one full commit SHA. Default

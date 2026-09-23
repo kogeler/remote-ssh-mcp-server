@@ -19,6 +19,7 @@ from ssh_wrapper.connection import (
 
 from . import __version__
 from .errors import RemoteMCPError
+from .machine import VENV_NAMESPACE_DIRECTORY, MachineIdentityError, environment_key
 
 __all__ = [
     "ConnectionMode",
@@ -37,11 +38,12 @@ MAX_COMMAND_TIMEOUT = 86_400.0
 MIN_OUTPUT_BYTES = 1_024
 MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 MAX_TRANSFERS = 16
+MAX_SESSIONS = 32
 _RUNTIME_ROOT_MARKERS = (".version", "requirements.txt", "remote-ssh-mcp")
 
 
 def runtime_repository_root() -> Path:
-    """Resolve the project root which owns the active virtual environment."""
+    """Resolve the project owning the active venv in this machine's namespace."""
     try:
         prefix = Path(sys.prefix).resolve(strict=True)
         base_prefix = Path(sys.base_prefix).resolve(strict=True)
@@ -56,7 +58,22 @@ def runtime_repository_root() -> Path:
             "remote-ssh-mcp requires a project-owned virtual environment",
         )
 
-    root = prefix.parent
+    namespace = prefix.parent
+    if namespace.parent.name != VENV_NAMESPACE_DIRECTORY:
+        raise RemoteMCPError(
+            "invalid_configuration",
+            "the active virtual environment is not a machine-scoped project environment",
+        )
+    try:
+        key = environment_key()
+    except MachineIdentityError as error:
+        raise RemoteMCPError("invalid_configuration", str(error)) from error
+    if namespace.name != key:
+        raise RemoteMCPError(
+            "invalid_configuration",
+            "the active virtual environment belongs to another machine or user",
+        )
+    root = namespace.parent.parent
     for name in _RUNTIME_ROOT_MARKERS:
         try:
             mode = (root / name).lstat().st_mode
@@ -110,6 +127,7 @@ class RuntimeConfig:
     command_timeout: float
     max_output_bytes: int
     max_transfers: int
+    max_sessions: int
     log_level: str
     ssh_path: Path
     rsync_path: Path
@@ -160,6 +178,9 @@ class RuntimeConfig:
             ),
             max_transfers=_bounded_int(
                 "max transfers", args.max_transfers, 1, MAX_TRANSFERS
+            ),
+            max_sessions=_bounded_int(
+                "max sessions", args.max_sessions, 1, MAX_SESSIONS
             ),
             log_level=args.log_level,
             ssh_path=resolve_program("ssh"),

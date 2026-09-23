@@ -19,6 +19,12 @@ from typing import Any, Literal
 TOOL_ROOT = Path(__file__).resolve().parents[2]
 LIVE_RUNNER = TOOL_ROOT / "tests/live_podman_e2e.py"
 TARGET_ALIAS = "remote-ssh-mcp-podman-e2e"
+# The secondary alias reaches the same sshd through a different effective
+# HostName, which the MCP server deliberately treats as a separate server.
+SECONDARY_TARGET_ALIAS = f"{TARGET_ALIAS}-secondary"
+CONTAINER_TARGET_HOST = "live-target"
+CONTAINER_SECONDARY_TARGET_HOST = "live-target-secondary"
+HOST_SECONDARY_TARGET_HOST = "localhost"
 SERVER_HOME = Path("/home/box")
 SERVER_REPOSITORY = Path("/work/src/remote_ssh_mcp")
 OWNER_LABEL = "remote-ssh-mcp.owner"
@@ -95,6 +101,7 @@ class KeyMaterial:
 @dataclass(frozen=True, slots=True)
 class ConnectionFiles:
     ssh_host: str
+    secondary_ssh_host: str
     ssh_port: int
     expected_host_key: str
     observed_host_key: str

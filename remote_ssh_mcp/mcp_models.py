@@ -34,6 +34,23 @@ LocalPath = Annotated[
     ),
 ]
 OperationId = Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")]
+SessionId = Annotated[
+    str,
+    Field(
+        pattern=r"^[0-9a-f]{32}$",
+        description="Public session ID returned by connect and shown by session_list",
+    ),
+]
+SessionKey = Annotated[
+    str,
+    Field(
+        pattern=r"^[A-Za-z0-9_-]{43}$",
+        description=(
+            "Secret key returned only once by connect for this session; "
+            "never share it with other agents"
+        ),
+    ),
+]
 Timeout = Annotated[float, Field(ge=0.1, le=MAX_COMMAND_TIMEOUT)]
 SSHAlias = Annotated[
     str,
@@ -67,6 +84,15 @@ SSHPort = Annotated[
 
 class EmptyInput(StrictModel):
     pass
+
+
+class SessionInput(StrictModel):
+    session_id: SessionId
+    session_key: SessionKey
+
+
+class DisconnectInput(StrictModel):
+    session_id: SessionId
 
 
 class ConnectInput(StrictModel):
@@ -124,40 +150,40 @@ class ConnectInput(StrictModel):
         return ConnectionSpec.from_direct(self.host, self.user, self.port or 22)
 
 
-class ExecInput(StrictModel):
+class ExecInput(SessionInput):
     command: Annotated[str, Field(min_length=1, max_length=MAX_COMMAND_BYTES)]
     cwd: RemotePath | None = None
     timeout: Timeout | None = None
     spool_output: bool = False
 
 
-class StatInput(StrictModel):
+class StatInput(SessionInput):
     remote_path: RemotePath
 
 
-class ListDirectoryInput(StrictModel):
+class ListDirectoryInput(SessionInput):
     remote_path: RemotePath
 
 
-class ReadFileRangeInput(StrictModel):
+class ReadFileRangeInput(SessionInput):
     remote_path: RemotePath
     offset: Annotated[int, Field(ge=0)] = 0
     max_bytes: Annotated[int, Field(ge=1, le=MAX_OUTPUT_BYTES)] = 65_536
 
 
-class DownloadStartInput(StrictModel):
+class DownloadStartInput(SessionInput):
     remote_path: RemotePath
     local_path: LocalPath
     overwrite: bool = False
 
 
-class UploadStartInput(StrictModel):
+class UploadStartInput(SessionInput):
     local_path: LocalPath
     remote_path: RemotePath
     overwrite: bool = False
 
 
-class TransferIdInput(StrictModel):
+class TransferIdInput(SessionInput):
     operation_id: OperationId
 
 
@@ -186,15 +212,26 @@ class CommandData(StrictModel):
     duration_ms: int
 
 
-class ConnectionData(StrictModel):
+class SessionData(StrictModel):
+    session_id: str
     state: str
-    mode: str | None
-    target: str | None
+    mode: str
+    target: str
     ssh_alias: str | None
     host: str | None
     user: str | None
     port: int | None
+    server_host: str
+    server_port: int
     master_pid: int | None
+    created_at: str
+    last_used_at: str | None
+    active_commands: int
+    active_transfers: int
+
+
+class ConnectData(SessionData):
+    session_key: str
 
 
 class StatData(StrictModel):
@@ -244,9 +281,21 @@ class TransferData(StrictModel):
     error: PublicError | None
 
 
-class ConnectionResponse(StrictModel):
+class ConnectResponse(StrictModel):
     ok: bool
-    result: ConnectionData | None = None
+    result: ConnectData | None = None
+    error: PublicError | None = None
+
+
+class SessionResponse(StrictModel):
+    ok: bool
+    result: SessionData | None = None
+    error: PublicError | None = None
+
+
+class SessionListResponse(StrictModel):
+    ok: bool
+    result: list[SessionData] | None = None
     error: PublicError | None = None
 
 

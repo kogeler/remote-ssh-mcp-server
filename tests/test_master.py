@@ -181,12 +181,16 @@ async def test_lost_master_never_restarts_authentication(
     with pytest.raises(RemoteMCPError) as raised:
         await master.ensure_ready()
     assert raised.value.code == "connection_lost"
+    assert master.state is ConnectionState.LOST
     assert count.read_text(encoding="utf-8") == "1"
+    with pytest.raises(RemoteMCPError) as repeated:
+        await master.ensure_ready()
+    assert repeated.value.code == "connection_lost"
+
+    await master.close()
     assert stderr_task is not None and stderr_task.done()
     assert master._stderr_task is None
     assert master._stderr_tail.data == b""
-
-    await master.close()
     assert count.read_text(encoding="utf-8") == "1"
 
 

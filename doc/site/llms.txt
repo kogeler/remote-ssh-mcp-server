@@ -4,7 +4,8 @@ Canonical documentation: https://kogeler.github.io/remote-ssh-mcp-server/
 Source: https://github.com/kogeler/remote-ssh-mcp-server
 
 Remote SSH MCP exposes bounded remote-machine operations to MCP clients over
-one explicitly authenticated OpenSSH master. It supports CPython 3.13 and 3.14.
+explicitly authenticated, independently keyed OpenSSH sessions. It supports
+CPython 3.13 and 3.14.
 
 Documentation routes:
 - /remote-ssh-mcp-server/

@@ -16,8 +16,9 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -38,6 +39,7 @@ def required_environment(name: str) -> str:
 
 CONTAINER = required_environment("REMOTE_SSH_MCP_E2E_CONTAINER")
 TARGET = required_environment("REMOTE_SSH_MCP_E2E_TARGET")
+SECONDARY_TARGET = required_environment("REMOTE_SSH_MCP_E2E_SECONDARY_TARGET")
 REPOSITORY_ROOT = Path(required_environment("REMOTE_SSH_MCP_E2E_REPOSITORY"))
 LAUNCHER = Path(
     os.environ.get("REMOTE_SSH_MCP_E2E_LAUNCHER", REPOSITORY_ROOT / "remote-ssh-mcp")
@@ -266,8 +268,32 @@ def structured(result: CallToolResult) -> dict[str, Any]:
     return payload
 
 
+class ToolCaller(Protocol):
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any]
+    ) -> CallToolResult: ...
+
+
+class KeyedSession:
+    """Add one session's ID and key to every operational tool call."""
+
+    def __init__(self, client: ClientSession, connected: dict[str, Any]) -> None:
+        self.client = client
+        self.session_id = str(connected["session_id"])
+        self.session_key = str(connected["session_key"])
+
+    @property
+    def credentials(self) -> dict[str, str]:
+        return {"session_id": self.session_id, "session_key": self.session_key}
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> CallToolResult:
+        result = await self.client.call_tool(name, {**self.credentials, **arguments})
+        assert isinstance(result, CallToolResult)
+        return result
+
+
 async def call_ok(
-    session: ClientSession, name: str, arguments: dict[str, Any]
+    session: ToolCaller, name: str, arguments: dict[str, Any]
 ) -> dict[str, Any]:
     result = await session.call_tool(name, arguments)
     assert isinstance(result, CallToolResult)
@@ -280,7 +306,7 @@ async def call_ok(
 
 
 async def call_ok_list(
-    session: ClientSession, name: str, arguments: dict[str, Any]
+    session: ToolCaller, name: str, arguments: dict[str, Any]
 ) -> list[dict[str, Any]]:
     result = await session.call_tool(name, arguments)
     assert isinstance(result, CallToolResult)
@@ -293,7 +319,7 @@ async def call_ok_list(
 
 
 async def call_error(
-    session: ClientSession,
+    session: ToolCaller,
     name: str,
     arguments: dict[str, Any],
     expected_code: str,
@@ -311,7 +337,7 @@ async def call_error(
 
 
 async def start_transfer(
-    session: ClientSession, name: str, arguments: dict[str, Any]
+    session: ToolCaller, name: str, arguments: dict[str, Any]
 ) -> tuple[str, dict[str, Any]]:
     operation = await call_ok(session, name, arguments)
     operation_id = operation["operation_id"]
@@ -321,7 +347,7 @@ async def start_transfer(
 
 
 async def wait_transfer(
-    session: ClientSession, operation_id: str, timeout: float = 180
+    session: ToolCaller, operation_id: str, timeout: float = 180
 ) -> dict[str, Any]:
     async with asyncio.timeout(timeout):
         while True:
@@ -334,7 +360,7 @@ async def wait_transfer(
 
 
 async def wait_for_partial(
-    session: ClientSession, operation_id: str, timeout: float = 30
+    session: ToolCaller, operation_id: str, timeout: float = 30
 ) -> dict[str, Any]:
     async with asyncio.timeout(timeout):
         while True:
@@ -367,7 +393,7 @@ def hash_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-async def exercise_commands(session: ClientSession) -> None:
+async def exercise_commands(session: ToolCaller) -> None:
     stdout = await call_ok(session, "exec", {"command": "printf stdout-only"})
     assert stdout["stdout"]["data"] == "stdout-only"
     assert stdout["stderr"]["data"] == ""
@@ -456,7 +482,7 @@ async def exercise_commands(session: ClientSession) -> None:
     evidence("exec matrix, timeout, output bounds, and cancellation")
 
 
-async def exercise_inspection(session: ClientSession) -> None:
+async def exercise_inspection(session: ToolCaller) -> None:
     metadata = await call_ok(
         session, "stat", {"remote_path": f"{REMOTE_ROOT}/normal.txt"}
     )
@@ -518,7 +544,7 @@ async def exercise_inspection(session: ClientSession) -> None:
     evidence("stat, directory listing, ranges, unusual names, and failures")
 
 
-async def exercise_sudo(session: ClientSession) -> None:
+async def exercise_sudo(session: ToolCaller) -> None:
     privileged = await call_ok(
         session,
         "sudo_exec",
@@ -547,7 +573,7 @@ async def exercise_sudo(session: ClientSession) -> None:
     evidence("NOPASSWD, nonzero command, password/cache refusal, and policy denial")
 
 
-async def exercise_transfers(session: ClientSession, marker: bytes) -> None:
+async def exercise_transfers(session: ToolCaller, marker: bytes) -> None:
     download_id, download_start = await start_transfer(
         session,
         "download_start",
@@ -769,62 +795,220 @@ async def exercise_transfers(session: ClientSession, marker: bytes) -> None:
     evidence("download, upload, hashes, overwrite, cancel/resume, and limits")
 
 
-async def prove_explicit_disconnect(
-    session: ClientSession, master_pid: int, accepted_before: int
-) -> None:
+def established_transports() -> int:
     established = run_target(
         "/bin/bash",
         "-c",
         "ss -Htn state established '( sport = :22 )' | wc -l",
     )
-    assert int(established.strip()) == 1
+    return int(established.strip())
 
-    active = asyncio.create_task(
-        session.call_tool("exec", {"command": "exec sleep 60"})
-    )
-    await asyncio.sleep(1)
-    disconnected = await call_ok(session, "disconnect", {})
-    assert disconnected["state"] == "disconnected"
-    assert disconnected["master_pid"] is None
-    result = await asyncio.wait_for(active, timeout=15)
-    assert isinstance(result, CallToolResult)
-    payload = structured(result)
-    assert result.is_error
-    assert payload["error"]["code"] == "connection_lost"
 
-    await call_error(
-        session,
-        "stat",
-        {"remote_path": f"{REMOTE_ROOT}/normal.txt"},
-        "not_connected",
-    )
-    status = await call_ok(session, "connection_status", {})
-    assert status["state"] == "disconnected"
+def accepted_authentications() -> int:
+    return target_log().count("Accepted publickey for mcp-test")
+
+
+async def master_is_alive(master_pid: int) -> bool:
     if SERVER_CONTAINER:
-        survived = await asyncio.to_thread(
+        probe = await asyncio.to_thread(
             subprocess.run,
             [PODMAN, "exec", SERVER_CONTAINER, "/bin/kill", "-0", str(master_pid)],
             capture_output=True,
             check=False,
         )
-        assert survived.returncode != 0, "SSH master process survived disconnect"
-    else:
-        try:
-            os.kill(master_pid, 0)
-        except ProcessLookupError:
-            pass
-        else:
-            raise AssertionError("SSH master process survived disconnect")
-    await asyncio.sleep(1)
-    logs = target_log()
-    accepted_after = logs.count("Accepted publickey for mcp-test")
-    assert accepted_after == accepted_before == 1
-    established_after = run_target(
-        "/bin/bash",
-        "-c",
-        "ss -Htn state established '( sport = :22 )' | wc -l",
+        return probe.returncode == 0
+    try:
+        os.kill(master_pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+async def list_sessions(client: ClientSession) -> list[dict[str, Any]]:
+    result = await client.call_tool("session_list", {})
+    assert isinstance(result, CallToolResult)
+    payload = structured(result)
+    assert not result.is_error, payload
+    sessions = payload["result"]
+    assert isinstance(sessions, list)
+    return sessions
+
+
+async def exercise_independent_sessions(
+    client: ClientSession, primary: KeyedSession, primary_status: dict[str, Any]
+) -> str:
+    """Prove key isolation, one session per server, and parallel sessions."""
+    duplicate = await call_error(
+        client, "connect", {"ssh_alias": TARGET}, "already_connected"
     )
-    assert int(established_after.strip()) == 0
+    assert primary.session_id in duplicate["message"]
+    await call_error(
+        client,
+        "connect",
+        {
+            "host": primary_status["server_host"],
+            "user": "mcp-test",
+            "port": primary_status["server_port"],
+        },
+        "already_connected",
+    )
+    assert accepted_authentications() == 1
+    evidence("a second connect to an owned server failed before authentication")
+
+    if not SERVER_CONTAINER:
+        print(
+            "live: opening the second session; confirm the PIN dialog if shown "
+            "and touch the key again when asked.",
+            file=sys.stderr,
+            flush=True,
+        )
+    connected = await call_ok(client, "connect", {"ssh_alias": SECONDARY_TARGET})
+    secondary = KeyedSession(client, connected)
+    assert connected["state"] == "ready"
+    assert connected["ssh_alias"] == SECONDARY_TARGET
+    assert secondary.session_id != primary.session_id
+    assert secondary.session_key != primary.session_key
+    assert connected["server_host"] != primary_status["server_host"]
+    assert connected["server_port"] == primary_status["server_port"]
+    secondary_master_pid = connected["master_pid"]
+    assert isinstance(secondary_master_pid, int)
+    assert secondary_master_pid != primary_status["master_pid"]
+    assert accepted_authentications() == 2
+    assert established_transports() == 2
+    evidence("second independent session authenticated its own master")
+
+    listing = await client.call_tool("session_list", {})
+    assert isinstance(listing, CallToolResult)
+    listed_text = repr(structured(listing)) + repr(listing.content)
+    assert "session_key" not in listed_text
+    assert primary.session_key not in listed_text
+    assert secondary.session_key not in listed_text
+    sessions = structured(listing)["result"]
+    assert {value["session_id"] for value in sessions} == {
+        primary.session_id,
+        secondary.session_id,
+    }
+    assert {value["state"] for value in sessions} == {"ready"}
+    evidence("session_list shows both sessions without keys")
+
+    for session_id, session_key in (
+        (primary.session_id, secondary.session_key),
+        (secondary.session_id, primary.session_key),
+    ):
+        await call_error(
+            client,
+            "exec",
+            {"session_id": session_id, "session_key": session_key, "command": "id"},
+            "invalid_session_key",
+        )
+    evidence("a key from another session is rejected")
+
+    started = time.monotonic()
+    first, second = await asyncio.gather(
+        call_ok(primary, "exec", {"command": "sleep 2; printf primary"}),
+        call_ok(secondary, "exec", {"command": "sleep 2; printf secondary"}),
+    )
+    elapsed = time.monotonic() - started
+    assert first["stdout"]["data"] == "primary"
+    assert second["stdout"]["data"] == "secondary"
+    assert elapsed < 3.5, elapsed
+    evidence("two sessions executed commands in parallel")
+
+    set_download_rate_limit(True)
+    try:
+        operation_id, _ = await start_transfer(
+            primary,
+            "download_start",
+            {
+                "remote_path": f"{REMOTE_ROOT}/cancel-download.bin",
+                "local_path": "downloads/cross-session.bin",
+            },
+        )
+        await call_error(
+            secondary,
+            "download_start",
+            {
+                "remote_path": f"{REMOTE_ROOT}/normal.txt",
+                "local_path": "downloads/cross-session.bin",
+            },
+            "transfer_conflict",
+        )
+        await call_error(
+            secondary,
+            "transfer_status",
+            {"operation_id": operation_id},
+            "transfer_not_found",
+        )
+        await call_error(
+            secondary,
+            "transfer_cancel",
+            {"operation_id": operation_id},
+            "transfer_not_found",
+        )
+        assert await call_ok_list(secondary, "transfer_list", {}) == []
+        cancelled = await call_ok(
+            primary, "transfer_cancel", {"operation_id": operation_id}
+        )
+        assert cancelled["state"] == "cancelled"
+    finally:
+        set_download_rate_limit(False)
+    evidence("transfers are private to a session and destinations are exclusive")
+
+    active = asyncio.create_task(
+        secondary.call_tool("exec", {"command": "exec sleep 60"})
+    )
+    await asyncio.sleep(1)
+    closed = await call_ok(client, "disconnect", {"session_id": secondary.session_id})
+    assert closed["state"] == "closed"
+    assert closed["master_pid"] is None
+    interrupted = await asyncio.wait_for(active, timeout=15)
+    assert interrupted.is_error
+    assert structured(interrupted)["error"]["code"] == "connection_lost"
+    await call_error(secondary, "exec", {"command": "true"}, "session_not_found")
+    assert not await master_is_alive(secondary_master_pid)
+    await asyncio.sleep(1)
+    assert established_transports() == 1
+    still = await call_ok(primary, "exec", {"command": "printf still-primary"})
+    assert still["stdout"]["data"] == "still-primary"
+    remaining = await list_sessions(client)
+    assert [value["session_id"] for value in remaining] == [primary.session_id]
+    evidence("disconnect by ID without a key closed only the other session")
+    return secondary.session_key
+
+
+async def prove_explicit_disconnect(
+    client: ClientSession,
+    primary: KeyedSession,
+    master_pid: int,
+    accepted_before: int,
+) -> None:
+    assert established_transports() == 1
+
+    active = asyncio.create_task(
+        primary.call_tool("exec", {"command": "exec sleep 60"})
+    )
+    await asyncio.sleep(1)
+    disconnected = await call_ok(
+        client, "disconnect", {"session_id": primary.session_id}
+    )
+    assert disconnected["state"] == "closed"
+    assert disconnected["master_pid"] is None
+    result = await asyncio.wait_for(active, timeout=15)
+    payload = structured(result)
+    assert result.is_error
+    assert payload["error"]["code"] == "connection_lost"
+
+    await call_error(
+        primary,
+        "stat",
+        {"remote_path": f"{REMOTE_ROOT}/normal.txt"},
+        "session_not_found",
+    )
+    assert await list_sessions(client) == []
+    assert not await master_is_alive(master_pid), "SSH master survived disconnect"
+    await asyncio.sleep(1)
+    assert accepted_authentications() == accepted_before == 2
+    assert established_transports() == 0
     evidence("explicit disconnect stopped active work, master, and transport")
 
 
@@ -904,7 +1088,7 @@ async def main() -> None:
             assert {tool.name for tool in tools.tools} == {
                 "connect",
                 "disconnect",
-                "connection_status",
+                "session_list",
                 "exec",
                 "sudo_exec",
                 "stat",
@@ -922,59 +1106,63 @@ async def main() -> None:
             )
             evidence("MCP initialize, capabilities, tool list, and strict schemas")
 
-            status = await call_ok(session, "connection_status", {})
-            assert status["state"] == "disconnected"
-            await call_error(
+            assert await list_sessions(session) == []
+            missing_key = await call_error(
                 session,
                 "exec",
                 {"command": "true"},
-                "not_connected",
+                "invalid_arguments",
             )
-            evidence("MCP startup remained disconnected and did not invoke SSH")
+            assert "session_id, session_key" in missing_key["message"]
+            await call_error(
+                session,
+                "exec",
+                {"session_id": "0" * 32, "session_key": "A" * 43, "command": "true"},
+                "session_not_found",
+            )
+            evidence("MCP startup had no sessions and did not invoke SSH")
 
             connected = await call_ok(session, "connect", {"ssh_alias": TARGET})
             assert connected["state"] == "ready"
             assert connected["mode"] == "alias"
             assert connected["ssh_alias"] == TARGET
-            await call_error(
-                session,
-                "connect",
-                {"ssh_alias": TARGET},
-                "already_connected",
-            )
+            primary = KeyedSession(session, connected)
+            master_pid = connected["master_pid"]
+            assert isinstance(master_pid, int)
 
-            status = await call_ok(session, "connection_status", {})
+            [status] = await list_sessions(session)
+            assert status["session_id"] == primary.session_id
             assert status["state"] == "ready"
             assert status["target"] == TARGET
-            master_pid = status["master_pid"]
-            assert isinstance(master_pid, int)
-            evidence("single owned OpenSSH master ready")
+            assert status["master_pid"] == master_pid
+            assert "session_key" not in status
+            evidence("one keyed session owns its OpenSSH master")
 
             await call_error(
-                session,
+                primary,
                 "stat",
                 {"remote_path": f"{REMOTE_ROOT}/normal.txt", "target": "other"},
                 "invalid_arguments",
             )
-            await exercise_commands(session)
-            await exercise_inspection(session)
-            await exercise_sudo(session)
-            await exercise_transfers(session, marker)
+            await exercise_commands(primary)
+            await exercise_inspection(primary)
+            await exercise_sudo(primary)
+            await exercise_transfers(primary, marker)
 
-            status_after = await call_ok(session, "connection_status", {})
+            [status_after] = await list_sessions(session)
             assert status_after["state"] == "ready"
             assert status_after["master_pid"] == master_pid
-            logs = target_log()
-            accepted = logs.count("Accepted publickey for mcp-test")
-            established = run_target(
-                "/bin/bash",
-                "-c",
-                "ss -Htn state established '( sport = :22 )' | wc -l",
-            )
-            assert accepted == 1
-            assert int(established.strip()) == 1
+            assert status_after["last_used_at"] is not None
+            assert accepted_authentications() == 1
+            assert established_transports() == 1
             evidence("one authentication, one transport, and one stable master PID")
-            await prove_explicit_disconnect(session, master_pid, accepted)
+            issued_keys = [
+                primary.session_key,
+                await exercise_independent_sessions(session, primary, status_after),
+            ]
+            await prove_explicit_disconnect(
+                session, primary, master_pid, accepted_authentications()
+            )
 
         errlog.flush()
         errlog.seek(0)
@@ -983,7 +1171,8 @@ async def main() -> None:
     assert '"jsonrpc"' not in diagnostics
     assert marker.decode() not in diagnostics
     assert "PRIVATE KEY" not in diagnostics
-    evidence("stderr contains no protocol, private key, or payload marker")
+    assert all(key not in diagnostics for key in issued_keys)
+    evidence("stderr contains no protocol, private key, session key, or payload marker")
     print("E2E_COMPLETE", flush=True)
 
 
