@@ -3,7 +3,7 @@
 
 bandit[toml]==1.9.4
 build==1.6.1
-mypy==2.3.1
+mypy==2.4.0
 packaging==26.3
 pip-audit==2.10.1
 pytest==9.1.1
@@ -11,4 +11,4 @@ pytest-asyncio==1.4.0
 pytest-cov==7.1.0
 pytest-xdist==3.8.0
 pyyaml==6.0.3
-setuptools==84.0.0
+setuptools==84.2.1
